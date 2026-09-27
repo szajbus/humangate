@@ -82,20 +82,23 @@ survives either side restarting. The price is polling - an answer takes up to a 
    checklist): it writes the instructions to `.humangate/AGENTS.md` and adds a one-line
    reference to it to the project's `AGENTS.md` - a sentence any agent follows, whose
    `@.humangate/AGENTS.md` also makes Claude Code import the file.
+4. Optionally, list the files your tools run or read in `.humangate/guard`, so the loop tells
+   you when the agent changes them (see [Guarding files](#guarding-files)). `humangate init`
+   offers a starter list (or `--guard`) based on what it finds in the project.
 
 Every project directory - every git worktree, too - has its own queue, so run one loop per
 agent session.
 
 ### Commands
 
-| Command                                                            | Who   | Does                                                          |
-| ------------------------------------------------------------------ | ----- | ------------------------------------------------------------- |
-| `humangate loop`                                                   | you   | shows requests as they come and runs the approved ones        |
-| `humangate init [--global] [--force] [--instructions] [<tool>...]` | you   | adds starter tools and agent instructions                     |
-| `humangate request --reason <why> <tool> ...`                      | agent | asks for a tool to be run and waits for the outcome           |
-| `humangate tools [<tool>]`                                         | agent | lists the tools and their usage                               |
-| `humangate ping`                                                   | agent | checks the loop is running - answered at once, without asking |
-| `humangate wait <request-id>`                                      | agent | keeps waiting for a request after `request` timed out         |
+| Command                                                                      | Who   | Does                                                          |
+| ---------------------------------------------------------------------------- | ----- | ------------------------------------------------------------- |
+| `humangate loop`                                                             | you   | shows requests as they come and runs the approved ones        |
+| `humangate init [--global] [--force] [--instructions] [--guard] [<tool>...]` | you   | adds starter tools, agent instructions and a guard list       |
+| `humangate request --reason <why> <tool> ...`                                | agent | asks for a tool to be run and waits for the outcome           |
+| `humangate tools [<tool>]`                                                   | agent | lists the tools and their usage                               |
+| `humangate ping`                                                             | agent | checks the loop is running - answered at once, without asking |
+| `humangate wait <request-id>`                                                | agent | keeps waiting for a request after `request` timed out         |
 
 `request` waits 9 minutes by default - just under the 10-minute limit some agents put on a shell
 command (`--timeout <seconds>` to change) - then prints the tool's
@@ -137,6 +140,62 @@ answers at once, like `ping`. Without a running loop it lists only the project's
 - Keep it small and specific, so the command you're asked to approve says exactly what will
   happen. A `git-push <branch>` tool is easy to review; a `git <anything>` tool isn't.
 
+## Guarding files
+
+Your "yes" is only as good as what the approved command actually runs, and the agent can edit
+much of that: the tools themselves, git hooks and config (a `pre-push` hook or
+`core.sshCommand` can run anything), and whatever else your tools reach into - `package.json`
+scripts, a `Makefile`, CI workflows, an `.envrc` that direnv runs when you `cd` in. So the loop
+guards those files: it keeps their approved state in memory - at first, the state when it
+started - and checks them every couple of seconds and before each request.
+
+Always guarded, whatever the project:
+
+- the tools, in `.humangate/tools/` and `~/.humangate/tools/`;
+- git hooks, including a custom `core.hooksPath`;
+- the repository's git config, except `branch.*` - git writes those itself and they can't run
+  programs;
+- `.humangate/guard`, the project's own list of paths to guard.
+
+`.humangate/guard` lists one path or glob per line (`**` matches any depth), relative to the
+project root, or to your home on the host with `~/`. A directory covers everything in it;
+`#` starts a comment:
+
+```
+# Files humangate loop guards on top of the built-in ones ...
+package.json
+Makefile
+.github/workflows/
+.envrc
+```
+
+The loop reads the list from its approved state, so the agent can't drop an entry quietly:
+editing the list is a change to review like any other.
+
+When a guarded file changes, the loop rings the terminal bell and shows the change right away,
+before the agent asks for anything: a diff for text files, size and hash for binary or large
+ones, and mode and symlink changes. Then:
+
+- **n** keeps it unapproved: every request is refused until the change is reverted. The loop
+  doesn't bring up those files again until a request arrives, and each request offers the
+  review again - so you can still accept it then.
+- **y** accepts it as the new approved state, with no restart. If the change adds entries to
+  `.humangate/guard` (or moves `core.hooksPath`), the files it newly guards are part of the
+  same review.
+
+If a guarded file changes while you're deciding on a request, the request isn't run.
+
+Keep in mind:
+
+- It detects, it doesn't prevent. The agent can still write the files; humangate refuses to act
+  on them and tells you.
+- Switching branches or rebasing legitimately changes tracked files like `package.json` or
+  workflows, so expect to review those diffs after such git work. Hooks and git config don't
+  change with branches.
+- Every file is re-read on each check. Tens of files cost nothing; a big directory like
+  `node_modules/` would be slow, and there's little point guarding it anyway. The loop warns at
+  start if checking takes too long.
+
 ## Security
 
 humangate assumes the agent may try to trick you, and relies on you to read what you approve.
@@ -146,11 +205,10 @@ humangate assumes the agent may try to trick you, and relies on you to read what
   arguments, no shell involved.
   Control characters are stripped from the reason so it can't rewrite your terminal.
 - The agent can write to the project directory - including the tools, and the git config and
-  hooks a tool's git commands would run (a `pre-push` hook or `core.sshCommand` can run
-  anything). The loop fingerprints all of those - and the global tools, in case the sandbox
-  can reach your home after all - when it starts, and refuses every request once
-  any of them changed; review the change, then restart the loop to accept it. Changes to
-  `branch.*` config are allowed - git writes those itself and they can't run programs.
+  hooks a tool's git commands would run. The loop guards those (and the global tools, in case
+  the sandbox can reach your home after all), plus anything listed in `.humangate/guard`. It
+  shows you every change and refuses requests until you accept it - see
+  [Guarding files](#guarding-files).
 - Tools run with your full environment, so a tool's argument checks are what keeps it from
   doing more than its name says.
 - The loop refuses to start inside a workmux sandbox (`WM_SANDBOX_GUEST` set).

@@ -9,4 +9,7 @@ the keys stay on the host. Ask the person to run them with humangate:
 - Write the reason for the person reviewing it: what you did and why the tool is needed now.
 - Don't work around a rejection. If the person replies with a message instead (exit code 5),
   act on it.
+- The person guards some files - the tools, git hooks and config, and whatever
+  `.humangate/guard` lists. After you change one, requests are refused until they accept the
+  change, so say what you changed and why in your next reason.
 - If nobody answers, `humangate ping` tells whether the person is running `humangate loop`.

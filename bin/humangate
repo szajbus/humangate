@@ -8,7 +8,7 @@ the host in the same project directory, sees the request and decides.
 
 Usage:
   humangate loop                                        (the person, on the host)
-  humangate init [--global] [--force] [--instructions] [<tool>...]
+  humangate init [--global] [--force] [--instructions] [--guard] [<tool>...]
                                                         (set a project up)
   humangate request --reason "<why>" <tool> [<arg>...]  (the agent)
   humangate tools [<tool>]                              (what can be requested)
@@ -21,7 +21,8 @@ init adds ready-made tools (git-sign, git-push, git-push-with-force) to
 every project - picked from a checklist or named as arguments; it never
 overwrites a changed tool without --force. In a project it can also add instructions for the agent
 (--instructions): in .humangate/AGENTS.md, with a one-line reference from the
-project's AGENTS.md.
+project's AGENTS.md; and a list of files to guard (--guard), suggested from
+what it finds in the project, in .humangate/guard.
 
 Tools come from the project's .humangate/tools/ and the host's
 ~/.humangate/tools/; a project tool overrides a global one of the same name.
@@ -52,16 +53,23 @@ Ctrl-C while a request is up cancels just that request (or interrupts its
 running tool); while idle it stops the loop. Decisions are logged on the
 host, one file per project directory, in ~/.humangate/logs/.
 
-The agent can write to the project directory, including the tools and the
-git config and hooks they'd run with. So loop fingerprints those at start
-and refuses requests once any of them changed - review the change, then
-restart the loop to accept it.
+The agent can write to the project directory, including the tools and what
+they run. So loop guards those files: the tools, git hooks, the repo's git
+config, .humangate/guard itself and whatever that file lists (one path or
+glob per line; directories count recursively). It keeps their approved state
+in memory - the state at start, at first - and checks it every couple of
+seconds and before each request. A change shows up at once as a diff, with a
+choice: accept it as the approved state, or refuse requests until it's
+reverted (each new request offers the review again).
 
 Requests travel through .humangate/queue/ in the project directory (the git
 worktree root), which the sandbox and the host must both be able to write.
 """
 
+import collections
 import datetime
+import difflib
+import glob
 import hashlib
 import json
 import os
@@ -69,6 +77,7 @@ import re
 import secrets
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import termios
@@ -92,6 +101,14 @@ MAX_OUTPUT_CHARS = 64_000
 MAX_REASON_CHARS = 2_000
 REQUEST_ID = re.compile(r"^[0-9a-f]{16}$")
 TOOL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# The project's list of paths to guard, on top of the built-in ones, and the
+# key the repo's git config is guarded under.
+GUARD_FILE = ".humangate/guard"
+GIT_CONFIG = "git config"
+MAX_TEXT_BYTES = 256_000  # a larger or binary file is compared by hash, without a diff
+MAX_DIFF_LINES = 400
+GUARD_CHECK_SECONDS = 2
+SLOW_GUARD_SECONDS = 0.5
 
 
 
@@ -200,19 +217,46 @@ def git_path(worktree, *args):
     return os.path.join(worktree, out) if out and not os.path.isabs(out) else out
 
 
-def watched_paths(worktree):
-    """Files an approved tool effectively runs: the tools themselves, plus git
-    config and hooks, which can make any git command run arbitrary programs.
-    Global tools are included too, in case the sandbox can reach the host's
-    home after all."""
+def guard_entries(text):
+    """The paths and globs a .humangate/guard file lists."""
+    lines = (line.strip() for line in (text or "").splitlines())
+    return [line for line in lines if line and not line.startswith("#")]
+
+
+def guarded_roots(worktree, guard_text):
+    """What the loop guards, as (shown name, path or glob, is a glob): what an
+    approved tool effectively runs. Always the tools - global ones too, in
+    case the sandbox can reach the host's home after all - the guard file
+    itself, and git hooks, which can make any git command run arbitrary
+    programs (the repo's git config is guarded apart from these). Then the
+    project's own entries, from the guard file's approved text, so dropping
+    one takes a review like any other change."""
     common = git_path(worktree, "rev-parse", "--git-common-dir")
-    paths = [*(directory for _, directory in tool_dirs(worktree)), os.path.join(common, "hooks")]
+    paths = [
+        *(directory for _, directory in tool_dirs(worktree)),
+        os.path.join(worktree, GUARD_FILE),
+        os.path.join(common, "hooks"),
+    ]
     hooks_path = subprocess.run(
         ["git", "config", "core.hooksPath"], cwd=worktree, capture_output=True, text=True
     ).stdout.strip()
     if hooks_path:
         paths.append(os.path.join(worktree, os.path.expanduser(hooks_path)))
-    return paths
+    roots = [(display_path(path, worktree), os.path.normpath(path), False) for path in paths]
+    for entry in guard_entries(guard_text):
+        # Relative to the project root (a leading / too, as in .gitignore),
+        # or to the host's home with ~/.
+        base, rest = (os.path.expanduser("~"), entry[2:]) if entry.startswith("~/") else (worktree, entry)
+        rest = rest.strip("/")
+        if re.search(r"[*?[]", rest):
+            roots.append((entry, os.path.join(glob.escape(base), rest), True))
+        else:
+            roots.append((entry, os.path.normpath(os.path.join(base, rest)), False))
+    unique = []
+    for root in roots:
+        if all(root[1:] != seen[1:] for seen in unique):
+            unique.append(root)
+    return unique
 
 
 def repo_git_config(worktree):
@@ -228,25 +272,151 @@ def repo_git_config(worktree):
     )
 
 
-def fingerprint(worktree, paths):
-    digest = {"git config": hashlib.sha256("\n".join(repo_git_config(worktree)).encode()).hexdigest()}
-    for root in paths:
-        if os.path.isfile(root):
-            files = [root]
-        elif os.path.isdir(root):
-            files = [os.path.join(d, f) for d, _, names in os.walk(root) for f in names]
-        else:
-            digest[root] = None
-            continue
-        for path in files:
-            with open(path, "rb") as f:
-                digest[path] = (hashlib.sha256(f.read()).hexdigest(), os.stat(path).st_mode)
-    return digest
+# A guarded file as it's compared: link target (for a symlink), mode and the
+# contents' hash - plus the contents of a small text file, to diff against.
+Record = collections.namedtuple("Record", "link mode size sha text")
 
 
-def changed_since(worktree, snapshot, paths):
-    current = fingerprint(worktree, paths)
-    return sorted(p for p in set(snapshot) | set(current) if snapshot.get(p) != current.get(p))
+def text_record(text):
+    data = text.encode()
+    return Record(None, None, len(data), hashlib.sha256(data).hexdigest(), text)
+
+
+def file_record(path):
+    """The Record of a file, or None if there's none."""
+    link = None
+    try:
+        if os.path.islink(path):
+            link = os.readlink(path)
+        info = os.stat(path)
+        if not stat.S_ISREG(info.st_mode):
+            return Record(link, info.st_mode, None, None, None)
+        with open(path, "rb") as f:
+            data = f.read(MAX_TEXT_BYTES + 1)
+            digest, size = hashlib.sha256(data), len(data)
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+                size += len(chunk)
+    except OSError:
+        return None if link is None else Record(link, None, None, None, None)
+    text = None
+    if size <= MAX_TEXT_BYTES and b"\0" not in data:
+        try:
+            text = data.decode()
+        except UnicodeDecodeError:
+            pass
+    return Record(link, info.st_mode, size, digest.hexdigest(), text)
+
+
+def same(a, b):
+    if a is None or b is None:
+        return a is b
+    return (a.link, a.mode, a.sha) == (b.link, b.mode, b.sha)
+
+
+class Guard:
+    """The approved state of everything guarded_roots names, and what differs
+    from it now. The loop keeps it in memory, where the agent can't reach."""
+
+    def __init__(self, worktree, queue):
+        self.worktree = worktree
+        self.queue = queue
+        self.roots = guarded_roots(worktree, read_text(os.path.join(worktree, GUARD_FILE)))
+        started = time.monotonic()
+        self.approved = self.fingerprint()
+        self.check_seconds = time.monotonic() - started
+
+    def fingerprint(self, roots=None, config=True):
+        state = {GIT_CONFIG: text_record("\n".join(repo_git_config(self.worktree)) + "\n")} if config else {}
+        for _, path, is_glob in self.roots if roots is None else roots:
+            for match in sorted(glob.glob(path, recursive=True)) if is_glob else [path]:
+                self.add(state, match)
+        return state
+
+    def add(self, state, path):
+        if not os.path.isdir(path) or os.path.islink(path):
+            record = file_record(path)
+            if record:
+                state[path] = record
+            return
+        for directory, dirs, files in os.walk(path):
+            # The queue changes all the time and holds nothing that runs.
+            dirs[:] = [d for d in dirs if os.path.join(directory, d) != self.queue]
+            # os.walk doesn't descend into symlinked directories; record the links.
+            links = [d for d in dirs if os.path.islink(os.path.join(directory, d))]
+            for name in files + links:
+                record = file_record(os.path.join(directory, name))
+                if record:
+                    state[os.path.join(directory, name)] = record
+
+    def changed(self, current):
+        keys = set(self.approved) | set(current)
+        return sorted((k for k in keys if not same(self.approved.get(k), current.get(k))), key=lambda k: (k != GIT_CONFIG, k))
+
+    def name(self, key):
+        return "git config (this repository's)" if key == GIT_CONFIG else display_path(key, self.worktree)
+
+    def proposal(self, current):
+        """What accepting current would make the approved state: a changed
+        guard file or core.hooksPath changes what's guarded too, so this
+        includes the files it would newly guard, as they are now - for the
+        person to review with the rest. Returns (state, roots, newly guarded
+        files)."""
+        guard = current.get(os.path.join(self.worktree, GUARD_FILE))
+        roots = guarded_roots(self.worktree, guard.text if guard else None)
+        state = dict(current)
+        added = self.fingerprint([root for root in roots if root not in self.roots], config=False)
+        newly = {key for key in added if key not in state and key not in self.approved}
+        for key in newly:
+            state[key] = added[key]
+        return state, roots, newly
+
+    def accept(self, state, roots):
+        """Makes a reviewed proposal the approved state; returns the (added,
+        removed) roots."""
+        added = [root for root in roots if root not in self.roots]
+        removed = [root for root in self.roots if root not in roots]
+        self.approved, self.roots = dict(state), roots
+        if removed:
+            # Files no longer guarded are dropped - only if they're still
+            # there: one deleted since the review stays, so its deletion shows
+            # as a change.
+            covered = self.fingerprint()
+            for key in list(self.approved):
+                if key not in covered and os.path.lexists(key):
+                    del self.approved[key]
+        return added, removed
+
+
+def printable(text):
+    """Control characters shown as escapes, so what's displayed from a file
+    can't rewrite the terminal."""
+    return "".join(ch if ch.isprintable() or ch == "\t" else ascii(ch)[1:-1] for ch in text)
+
+
+def show_change(name, old, new, newly_guarded=False):
+    what = "newly guarded" if newly_guarded else "added" if old is None else "removed" if new is None else "changed"
+    print(f"{styled(printable(name), '1')} {dim(what)}")
+    if new is None:
+        return
+    if (old.link if old else None) != new.link:
+        print(f"  symlink: {printable(old.link or '(none)') if old else '(new)'} -> {printable(new.link or '(none)')}")
+    if old and old.mode and new.mode and old.mode != new.mode:
+        print(f"  mode: {stat.filemode(old.mode)} -> {stat.filemode(new.mode)}")
+    if old and old.sha == new.sha:
+        return
+    if new.text is not None and (old is None or old.text is not None):
+        diff = list(difflib.unified_diff(old.text.splitlines() if old else [], new.text.splitlines(), lineterm="", n=3))[2:]
+        colors = {"+": "32", "-": "31", "@": "36"}
+        for line in diff[:MAX_DIFF_LINES]:
+            print("  " + styled(printable(line), colors[line[0]]) if line[:1] in colors else "  " + printable(line))
+        if not diff:
+            print(dim("  (empty)"))
+        elif len(diff) > MAX_DIFF_LINES:
+            print(dim(f"  ... {len(diff) - MAX_DIFF_LINES} more lines not shown - look at the file before accepting"))
+    elif new.sha is not None:
+        before = f"{old.size} bytes, sha256 {old.sha[:12]} -> " if old and old.sha else ""
+        print(f"  contents: {before}{new.size} bytes, sha256 {new.sha[:12]} {dim('(binary or large - no diff)')}")
 
 
 def global_tools_dir():
@@ -423,11 +593,14 @@ CHOICES = [
     ("always", "a", "Yes, and don't ask again for this exact command (until restart)"),
     ("reply", "r", "Reply to the agent instead..."),
 ]
-DEFAULT_CHOICE = 0  # "No" - an accidental Enter never runs anything
+GUARD_CHOICES = [
+    ("refuse", "n", "No - refuse requests until it's reverted"),
+    ("accept", "y", "Yes, accept it as the approved state"),
+]
 
 
 def choose():
-    """Arrow-key menu (or its shortcut letters); returns (choice, reply text)."""
+    """The menu for a request; returns (choice, reply text)."""
     if not sys.stdin.isatty():
         # Piped input (tests, scripts): one line - y, a, n/empty or a reply.
         line = ask("Run it? [y/a/N/r or reply text] ").strip()
@@ -438,48 +611,7 @@ def choose():
         text = ask("Reply: ").strip() if line.lower() == "r" else line
         return ("reply", text) if text else ("no", "")
 
-    fd = sys.stdin.fileno()
-    saved = termios.tcgetattr(fd)
-    selected = DEFAULT_CHOICE
-
-    def render(first):
-        if not first:
-            sys.stdout.write(f"\033[{len(CHOICES)}A")
-        for index, (_, key, label) in enumerate(CHOICES):
-            line = f"{key}  {label}"
-            text = styled(f"❯ {line}", "1", "36") if index == selected else f"  {dim(line)}"
-            sys.stdout.write(f"\r\033[K  {text}\n")
-        sys.stdout.flush()
-
-    print(f"\n{styled('Run it?', '1', '32')} {dim('(↑/↓ and Enter, or a shortcut letter)')}")
-    sys.stdout.write("\033[?25l")  # hide the cursor while the menu is up
-    render(first=True)
-    try:
-        tty.setcbreak(fd)  # keeps Ctrl-C working, as a KeyboardInterrupt
-        while True:
-            key = os.read(fd, 3)
-            if key in (b"\x1b[A", b"k"):
-                selected = (selected - 1) % len(CHOICES)
-            elif key in (b"\x1b[B", b"j"):
-                selected = (selected + 1) % len(CHOICES)
-            elif key in (b"\r", b"\n"):
-                break
-            else:
-                shortcut = [i for i, (_, k, _) in enumerate(CHOICES) if k.encode() == key.lower()]
-                if not shortcut:
-                    continue
-                selected = shortcut[0]
-                render(first=False)
-                break
-            render(first=False)
-    except KeyboardInterrupt:
-        return "cancel", ""
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
-        sys.stdout.write("\033[?25h")
-        sys.stdout.flush()
-
-    choice = CHOICES[selected][0]
+    choice = menu("Run it?", CHOICES)
     if choice == "reply":
         try:
             text = ask(f"{styled('Reply:', '1', '35')} ").strip()
@@ -487,6 +619,60 @@ def choose():
             return "cancel", ""
         return ("reply", text) if text else ("no", "")
     return choice, ""
+
+
+def confirm_change():
+    if not sys.stdin.isatty():
+        # Piped input: one line - y accepts, anything else refuses.
+        return "accept" if ask("Accept the change? [y/N] ").strip().lower() == "y" else "refuse"
+    return menu("Accept the change?", GUARD_CHOICES)
+
+
+def menu(question, choices):
+    """Arrow-key menu of (name, shortcut, label) choices, or their shortcut
+    letters. The first is preselected, so it must be the safe one. Returns the
+    chosen name, or "cancel" on Ctrl-C."""
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    selected = 0
+
+    def render(first):
+        if not first:
+            sys.stdout.write(f"\033[{len(choices)}A")
+        for index, (_, key, label) in enumerate(choices):
+            line = f"{key}  {label}"
+            text = styled(f"❯ {line}", "1", "36") if index == selected else f"  {dim(line)}"
+            sys.stdout.write(f"\r\033[K  {text}\n")
+        sys.stdout.flush()
+
+    print(f"\n{styled(question, '1', '32')} {dim('(↑/↓ and Enter, or a shortcut letter)')}")
+    sys.stdout.write("\033[?25l")  # hide the cursor while the menu is up
+    render(first=True)
+    try:
+        tty.setcbreak(fd)  # keeps Ctrl-C working, as a KeyboardInterrupt
+        while True:
+            key = os.read(fd, 3)
+            if key in (b"\x1b[A", b"k"):
+                selected = (selected - 1) % len(choices)
+            elif key in (b"\x1b[B", b"j"):
+                selected = (selected + 1) % len(choices)
+            elif key in (b"\r", b"\n"):
+                break
+            else:
+                shortcut = [i for i, (_, k, _) in enumerate(choices) if k.encode() == key.lower()]
+                if not shortcut:
+                    continue
+                selected = shortcut[0]
+                render(first=False)
+                break
+            render(first=False)
+    except KeyboardInterrupt:
+        return "cancel"
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        sys.stdout.write("\033[?25h")
+        sys.stdout.flush()
+    return choices[selected][0]
 
 
 def run(worktree, argv):
@@ -516,11 +702,54 @@ class Approver:
     def __init__(self, worktree):
         self.worktree = worktree
         self.queue = ensure_queue(worktree)
-        self.paths = watched_paths(worktree)
-        self.snapshot = fingerprint(worktree, self.paths)
+        self.guard = Guard(worktree, self.queue)
+        # Changed guarded files the person saw and didn't accept - watch()
+        # stays quiet about them; a request still offers the review again.
+        self.reviewed = set()
         # Commands answered with "a": exact (tool, args) pairs that run
         # without asking until this process exits.
         self.always = set()
+
+    def watch(self):
+        """The tripwire, between requests: a change to a guarded file is shown
+        the moment it's noticed, before the agent asks for anything."""
+        current = self.guard.fingerprint()
+        changed = self.guard.changed(current)
+        if not changed and self.reviewed:
+            print(dim("\nGuarded files are back to their approved state."))
+            self.reviewed = set()
+        elif changed and not set(changed) <= self.reviewed:
+            self.review(current, changed, waiting=False)
+
+    def review(self, current, changed, waiting):
+        """Shows what changed in the guarded files and asks whether to accept
+        it; returns True if accepted."""
+        sys.stdout.write("\a")  # a change can come any time; get the person's attention
+        print(f"\n\n{styled('── Guarded files changed ──', '1', '31')}\n")
+        print(
+            "A request is waiting; it's refused unless you accept this.\n"
+            if waiting else "Requests are refused until you accept this or it's reverted.\n"
+        )
+        state, roots, newly = self.guard.proposal(current)
+        for key in self.guard.changed(state):
+            show_change(self.guard.name(key), self.guard.approved.get(key), state.get(key), key in newly)
+        names = [self.guard.name(key) for key in self.guard.changed(state)]
+        choice = confirm_change()
+        print()
+        if choice == "accept":
+            added, removed = self.guard.accept(state, roots)
+            self.reviewed = set()
+            log(self.worktree, {"kind": "guard", "decision": "accepted", "changed": names})
+            print(styled("Accepted - that's the approved state now.", "1", "32"))
+            if added:
+                print(dim(f"Now also guarding: {', '.join(name for name, _, _ in added)}"))
+            if removed:
+                print(dim(f"No longer guarding: {', '.join(name for name, _, _ in removed)}"))
+            return True
+        self.reviewed |= set(changed)
+        log(self.worktree, {"kind": "guard", "decision": "refused", "changed": names})
+        print(styled("Not accepted - requests are refused until it's reverted.", "1", "31"))
+        return False
 
     def handle(self, request_id):
         claimed = os.path.join(self.queue, request_id + ".claimed.json")
@@ -555,18 +784,20 @@ class Approver:
                 return
             if request.get("kind") != "run":
                 raise Invalid(f"unknown request kind {request.get('kind')!r}")
-            changed = changed_since(self.worktree, self.snapshot, self.paths)
-            if changed:
-                raise Invalid(
-                    "changed since humangate loop started (the person has to review it and "
-                    "restart the loop): "
-                    + ", ".join(p if p == "git config" else display_path(p, self.worktree) for p in changed)
-                )
-            tool = resolve_tool(self.worktree, request.get("tool"))
+            resolve_tool(self.worktree, request.get("tool"))
             args = request.get("args")
             if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
                 raise Invalid("args must be a list of strings")
             reason = clean_text(request.get("reason"), required=True)
+            current = self.guard.fingerprint()
+            changed = self.guard.changed(current)
+            if changed and not self.review(current, changed, waiting=True):
+                raise Invalid(
+                    "guarded files changed and the person hasn't accepted the change: "
+                    + ", ".join(self.guard.name(key) for key in changed)
+                )
+            # Resolved again: accepting a change may have changed the tools.
+            tool = resolve_tool(self.worktree, request.get("tool"))
         except (Invalid, ValueError) as error:
             print(f"\n{styled('Refused an invalid request', '1', '31')} {dim(request_id)}: {error}")
             finish({"status": "invalid", "message": str(error)}, decision="invalid", message=str(error))
@@ -590,7 +821,13 @@ class Approver:
             choice, reply = choose()
         print()
 
-        if choice in ("yes", "always"):
+        if choice in ("yes", "always") and self.guard.changed(self.guard.fingerprint()):
+            # Changed while the person was deciding: what they approved isn't
+            # what would run.
+            message = "guarded files changed while the request was up - not run; request it again"
+            finish({"status": "rejected", "message": message}, **entry, decision="refused", message=message)
+            print(styled("Guarded files changed meanwhile - not run.", "1", "31"))
+        elif choice in ("yes", "always"):
             if choice == "always":
                 self.always.add(key)
             exit_code, output = run(self.worktree, argv)
@@ -712,13 +949,24 @@ def cmd_loop(argv):
     print(f"{title('humangate loop')} watching {approver.queue} {dim('(Ctrl-C to stop)')}")
     tools = [f"{n} (global)" if scope == "global" else n for n, (scope, _) in available_tools(worktree).items()]
     print(dim(f"Tools: {', '.join(tools) or 'none'}"))
+    guard = approver.guard
+    guarded = ", ".join([GIT_CONFIG, *(name for name, _, _ in guard.roots)])
+    print(dim(f"Guarding: {guarded} ({len(guard.approved) - 1} files)"))
+    if guard.check_seconds > SLOW_GUARD_SECONDS:
+        print(styled(
+            f"Checking the guarded files takes {guard.check_seconds:.1f}s - narrow down {GUARD_FILE}.", "1", "33"
+        ))
     print(dim(f"Log: {log_path(worktree)}"))
     # Ctrl-C while a request is up cancels just that request (handled in
     # choose/run); while idle it stops the loop.
     try:
+        last_check = time.monotonic()
         while True:
             for request_id in approver.pending():
                 approver.handle(request_id)
+            if time.monotonic() - last_check > GUARD_CHECK_SECONDS:
+                approver.watch()
+                last_check = time.monotonic()
             time.sleep(POLL_SECONDS)
     except KeyboardInterrupt:
         approver.release_abandoned()
@@ -904,6 +1152,9 @@ the keys stay on the host. Ask the person to run them with humangate:
 - Write the reason for the person reviewing it: what you did and why the tool is needed now.
 - Don't work around a rejection. If the person replies with a message instead (exit code 5),
   act on it.
+- The person guards some files - the tools, git hooks and config, and whatever
+  `.humangate/guard` lists. After you change one, requests are refused until they accept the
+  change, so say what you changed and why in your next reason.
 - If nobody answers, `humangate ping` tells whether the person is running `humangate loop`.
 """
 
@@ -958,8 +1209,50 @@ def write_instructions(worktree, force):
     return changes
 
 
+GUARD_HEADER = """\
+# Files `humangate loop` guards on top of the built-in ones - its tools, this
+# file, git hooks and the repository's git config: whatever the tools run or
+# read, which the agent could change. One path or glob per line, relative to
+# the project root (~/ for the host's home); a directory covers everything in
+# it. The loop shows a change as a diff and refuses requests until the person
+# accepts it.
+"""
+# What init suggests guarding, when the project has it: files that build
+# tools, task runners, CI and the shell run as code.
+GUARD_CANDIDATES = [
+    "package.json", ".npmrc", ".yarnrc.yml", "Makefile", "justfile", "Justfile", "Taskfile.yml",
+    "Rakefile", "Gemfile", "pyproject.toml", "setup.py", "noxfile.py", "tox.ini", "Cargo.toml",
+    "build.rs", ".cargo/", ".mise.toml", "mise.toml", ".envrc", ".pre-commit-config.yaml",
+    ".husky/", "lefthook.yml", ".github/workflows/", ".gitlab-ci.yml", ".gitmodules",
+]
+
+
+def guard_suggestions(worktree):
+    """(whether the guard file exists, suggested entries it doesn't list yet)."""
+    text = read_text(os.path.join(worktree, GUARD_FILE))
+    listed = {entry.strip("/") for entry in guard_entries(text)}
+    found = [c for c in GUARD_CANDIDATES if os.path.lexists(os.path.join(worktree, c.rstrip("/")))]
+    return text is not None, [c for c in found if c.strip("/") not in listed]
+
+
+def write_guard(worktree):
+    """Creates the guard file, or adds the suggestions it's missing - never
+    removes an entry. Returns what changed, for display, or None."""
+    exists, missing = guard_suggestions(worktree)
+    if exists and not missing:
+        return None
+    path = os.path.join(worktree, GUARD_FILE)
+    text = read_text(path) or GUARD_HEADER
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        # Below the header, a blank line; after existing entries, none.
+        f.write(text.rstrip("\n") + "\n" + ("" if exists else "\n") + "".join(e + "\n" for e in missing))
+    listed = ", ".join(missing) or "nothing found to suggest yet"
+    return f"{'added to' if exists else 'created'} {GUARD_FILE}: {listed}"
+
+
 def cmd_init(argv):
-    flags = {"--force", "--global", "--instructions"}
+    flags = {"--force", "--global", "--instructions", "--guard"}
     force = "--force" in argv
     is_global = "--global" in argv
     names = [a for a in argv if a not in flags]
@@ -968,6 +1261,8 @@ def cmd_init(argv):
         usage(f"unknown tool {', '.join(unknown)} (available: {', '.join(STARTER_TOOLS)})")
     if is_global and "--instructions" in argv:
         usage("--instructions go into a project's AGENTS.md, not with --global")
+    if is_global and "--guard" in argv:
+        usage(f"--guard writes a project's {GUARD_FILE}, not with --global")
 
     if is_global:
         if os.environ.get("WM_SANDBOX_GUEST"):
@@ -980,6 +1275,7 @@ def cmd_init(argv):
         tools_dir = os.path.join(worktree, ".humangate", "tools")
         shown_dir = ".humangate/tools"
     add_instructions = "--instructions" in argv
+    add_guard = "--guard" in argv
 
     def status(name):
         path = os.path.join(tools_dir, name)
@@ -988,10 +1284,10 @@ def cmd_init(argv):
         with open(path) as f:
             return "same" if f.read() == STARTER_TOOLS[name][1] else "differs"
 
-    if not names and not add_instructions:
+    if not names and not add_instructions and not add_guard:
         if not sys.stdin.isatty():
             usage(
-                f"name what to add, e.g. `humangate init --instructions git-sign git-push` "
+                f"name what to add, e.g. `humangate init --instructions --guard git-sign git-push` "
                 f"(tools: {', '.join(STARTER_TOOLS)})"
             )
         notes = {"new": "", "same": dim(" (already added)"), "differs": dim(" (yours differs - kept unless --force)")}
@@ -1004,6 +1300,11 @@ def cmd_init(argv):
                     instructions_status(worktree),
                 )
             )
+            exists, missing = guard_suggestions(worktree)
+            label = f"files to guard ({GUARD_FILE})"
+            if missing:
+                label += f": {', '.join(missing)}"
+            items.append(("--guard", label, "new" if missing or not exists else "same"))
         picked = checklist(
             "Add to this project" if worktree else f"Add tools to {shown_dir}/",
             [(label + notes[state], state == "new") for _, label, state in items],
@@ -1013,11 +1314,17 @@ def cmd_init(argv):
             return EXIT_CANCELLED
         chosen = [items[i][0] for i in picked]
         add_instructions = "--instructions" in chosen
-        names = [c for c in chosen if c != "--instructions"]
+        add_guard = "--guard" in chosen
+        names = [c for c in chosen if c not in flags]
         print()
 
     changed = False
-    instructions_changed = []
+    files_changed = []
+    if add_guard:
+        change = write_guard(worktree)
+        print(f"guard: {change or 'already there'}")
+        if change:
+            files_changed.append(GUARD_FILE)
     if names:
         os.makedirs(tools_dir, exist_ok=True)
     for name in names:
@@ -1039,18 +1346,18 @@ def cmd_init(argv):
         changes = write_instructions(worktree, force)
         print(f"instructions: {'; '.join(changes) or 'already there'}")
         if any(c.startswith(("added", "updated")) for c in changes):
-            instructions_changed.append(AGENT_INSTRUCTIONS_FILE)
+            files_changed.append(AGENT_INSTRUCTIONS_FILE)
         if any(c.startswith("pointed") for c in changes):
-            instructions_changed.append(instructions_file(worktree))
+            files_changed.append(instructions_file(worktree))
 
+    review = " A running `humangate loop` asks you to review the change."
     if changed and is_global:
-        print(dim("\nGlobal tools are available in every project. A running `humangate loop` "
-                  "refuses requests until restarted."))
-    elif changed or instructions_changed:
-        paths = ([".humangate/tools/"] if changed else []) + instructions_changed
+        print(dim("\nGlobal tools are available in every project." + review))
+    elif changed or files_changed:
+        paths = ([".humangate/tools/"] if changed else []) + files_changed
         listed = ", ".join(paths[:-1]) + " and " + paths[-1] if len(paths) > 1 else paths[0]
-        restart = " A running `humangate loop` refuses requests until restarted." if changed else ""
-        print(dim(f"\nCommit {listed} so the changes travel with the project.{restart}"))
+        guarded = changed or GUARD_FILE in files_changed
+        print(dim(f"\nCommit {listed} so the changes travel with the project.{review if guarded else ''}"))
     return 0
 
 
