@@ -100,7 +100,7 @@ EXIT_CANCELLED = 130
 DEFAULT_TIMEOUT = 540
 POLL_SECONDS = 0.5
 PROGRESS_SECONDS = 30
-TOOLS_TIMEOUT = 3
+QUICK_TIMEOUT = 3  # for what the loop answers without asking: tools, ping
 MAX_OUTPUT_CHARS = 64_000
 MAX_REASON_CHARS = 2_000
 REQUEST_ID = re.compile(r"^[0-9a-f]{16}$")
@@ -527,33 +527,51 @@ def cmd_tools(argv):
     # loop - it answers at once, like ping. Without a loop, list what's
     # visible here.
     queue = queue_dir()
-    request_id = submit(queue, {"kind": "tools", "name": name})
-    request = os.path.join(queue, request_id + ".request.json")
+    outcome = ask_loop(queue, {"kind": "tools", "name": name})
+    if outcome is None:
+        print(
+            f"humangate: {no_answer(queue)}, so this lists only the tools visible here - "
+            "global ones on the host are missing.\n",
+            file=sys.stderr,
+        )
+        exit_code, text = describe_tools(worktree_root(), name)
+        print(text, end="")
+        return exit_code
+    print(outcome.get("output", ""), end="")
+    return outcome.get("exit_code", 0)
+
+
+def ask_loop(queue, request):
+    """Submits a request the loop answers at once, without asking the person
+    (tools, ping). Returns the outcome, or None if no loop took it in time -
+    the request is withdrawn then."""
+    request_id = submit(queue, request)
+    pending = os.path.join(queue, request_id + ".request.json")
     result = os.path.join(queue, request_id + ".result.json")
     started = time.monotonic()
     while not os.path.exists(result):
         waited = time.monotonic() - started
         # A claimed request is answered at once, so wait a little longer for
         # it - but not forever, in case the loop died right after claiming.
-        if waited > TOOLS_TIMEOUT and (os.path.exists(request) or waited > 10 * TOOLS_TIMEOUT):
+        if waited > QUICK_TIMEOUT and (os.path.exists(pending) or waited > 10 * QUICK_TIMEOUT):
             try:
-                os.remove(request)
+                os.remove(pending)
             except FileNotFoundError:
                 pass  # claimed just now, or long ago by a loop that died
-            print(
-                "humangate: no answer from `humangate loop`, so this lists only the tools visible "
-                "here - global ones on the host are missing.\n",
-                file=sys.stderr,
-            )
-            exit_code, text = describe_tools(worktree_root(), name)
-            print(text, end="")
-            return exit_code
+            return None
         time.sleep(POLL_SECONDS / 5)
     with open(result) as f:
         outcome = json.load(f)
     os.remove(result)
-    print(outcome.get("output", ""), end="")
-    return outcome.get("exit_code", 0)
+    return outcome
+
+
+def no_answer(queue):
+    # The loop takes requests one at a time, so while the person is deciding
+    # on one, a quick request waits too.
+    if any(name.endswith(".claimed.json") for name in os.listdir(queue)):
+        return "no answer - `humangate loop` seems busy with another request the person is reviewing"
+    return "no answer from `humangate loop` - it's not running in this project on the host"
 
 
 def clean_text(text, required):
@@ -929,7 +947,12 @@ def cmd_ping(argv):
     if argv:
         usage("ping takes no arguments")
     queue = queue_dir()
-    return wait_or_cancel(queue, submit(queue, {"kind": "ping"}), DEFAULT_TIMEOUT)
+    outcome = ask_loop(queue, {"kind": "ping"})
+    if outcome is None:
+        print(f"humangate: {no_answer(queue)}", file=sys.stderr)
+        return EXIT_TIMEOUT
+    print(outcome.get("output", ""), end="")
+    return outcome.get("exit_code", 0)
 
 
 def cmd_wait(argv):
