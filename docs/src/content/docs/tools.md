@@ -3,7 +3,10 @@ title: Tools
 description: What a humangate tool is and how to write one.
 ---
 
-A tool is any executable in a project's `.humangate/tools/` or in `~/.humangate/tools/` on the
+A tool is a capability you grant the agent. You're not asked "is this shell command safe?" but
+"do I let the agent do this, with these arguments?" - a question you can answer at a glance.
+
+It's any executable in a project's `.humangate/tools/` or in `~/.humangate/tools/` on the
 host (global tools, available in every project). It runs in the project root on the host with
 the agent's arguments as-is.
 
@@ -17,4 +20,14 @@ them for it.
 - Validate every argument - they come from the agent. Refuse anything unexpected with a
   non-zero exit and a message on stderr.
 - Keep it small and specific, so the command you're asked to approve says exactly what will
-  happen. A `git-push <branch>` tool is easy to review; a `git <anything>` tool isn't.
+  happen. `git-push <branch>` is a capability you can decide on; `git <anything>` isn't.
+- Run as little of the project's code as you can. The agent could have written any of it, so
+  a tool that runs it can be made to do more than its name says. Git's own hooks and config
+  are [guarded](/guarding-files/); for anything more, see below.
+
+## Tools that run project code
+
+Some tools can't avoid it - a deploy script, a release task. Don't let them run the working
+tree the agent edits; have them check out code that's been reviewed, like `origin/main`, into
+a fresh directory and run it from there. That only works if the agent can't change that code
+through your tools alone - say, `main` accepts only reviewed pull requests.

@@ -1,7 +1,8 @@
 # humangate
 
-Coding agents are safest in a sandbox without your keys. humangate keeps you in the loop for
-what the agent can't be trusted to do alone:
+Coding agents are safest in a sandbox without your keys - but then they can't sign a commit,
+push or deploy. humangate gives the agent those capabilities back without giving it the keys,
+and keeps you in the loop for what it can't be trusted to do alone:
 
 - **Actions that need your keys.** The agent can't sign a commit or push a branch, so it asks
   you to run the command on the host. You see why and exactly what will run, and nothing
@@ -121,7 +122,10 @@ agent session.
 
 ## Tools
 
-A tool is any executable in a project's `.humangate/tools/` or in `~/.humangate/tools/` on the
+A tool is a capability you grant the agent. You're not asked "is this shell command safe?" but
+"do I let the agent do this, with these arguments?" - a question you can answer at a glance.
+
+It's any executable in a project's `.humangate/tools/` or in `~/.humangate/tools/` on the
 host (global tools, available in every project). It runs in the project root on the host with
 the agent's arguments as-is.
 
@@ -135,15 +139,26 @@ them for it.
 - Validate every argument - they come from the agent. Refuse anything unexpected with a
   non-zero exit and a message on stderr.
 - Keep it small and specific, so the command you're asked to approve says exactly what will
-  happen. A `git-push <branch>` tool is easy to review; a `git <anything>` tool isn't.
+  happen. `git-push <branch>` is a capability you can decide on; `git <anything>` isn't.
+- Run as little of the project's code as you can. The agent could have written any of it, so
+  a tool that runs it can be made to do more than its name says. Git's own hooks and config
+  are [guarded](#guarding-files); for anything more, see below.
+
+### Tools that run project code
+
+Some tools can't avoid it - a deploy script, a release task. Don't let them run the working
+tree the agent edits; have them check out code that's been reviewed, like `origin/main`, into
+a fresh directory and run it from there. That only works if the agent can't change that code
+through your tools alone - say, `main` accepts only reviewed pull requests.
 
 ## Guarding files
 
 Your "yes" is only as good as what the approved command runs, and the agent can edit much of
 that: the tools, git hooks and config (a `pre-push` hook or `core.sshCommand` can run
 anything), and whatever else your tools reach into - `package.json` scripts, a `Makefile`, CI
-workflows, an `.envrc`, etc. So the loop guards these files: it remembers their state when it
-starts, and checks them every couple of seconds and before each request.
+workflows, an `.envrc`, etc. A tool that runs such a file is a *confused deputy*: it acts on
+the agent's code with your credentials. So the loop guards these files: it remembers their
+state when it starts, and checks them every couple of seconds and before each request.
 
 Always guarded: the project's tools, git hooks (including `core.hooksPath`), the repository's git config
 except `branch.*` (git writes those itself), and `.humangate/guard` - the project's list of
@@ -170,6 +185,9 @@ Keep in mind:
 
 - It detects, it doesn't prevent: the agent can still write the files, humangate just refuses
   to act until you've seen the change.
+- It doesn't follow code. Guarding `package.json` doesn't cover the script it runs, or what
+  that script imports. List the entry points; for a tool that runs much of the project's code,
+  run a reviewed ref instead (see [Tools that run project code](#tools-that-run-project-code)).
 - Switching branches or rebasing changes tracked files like `package.json`, so expect to review
   those diffs after such git work.
 - Every file is re-read on each check - fine for tens of files, slow for something like
@@ -177,7 +195,21 @@ Keep in mind:
 
 ## Security
 
-humangate assumes the agent may try to trick you, and relies on you to read what you approve.
+```
+   sandbox - untrusted                     host - trusted
+ ┌─────────────────────────┐            ┌─────────────────────────┐
+ │ agent                   │  request   │ humangate loop - you    │
+ │ read-only credentials   │ ─────────► │ approve or refuse       │
+ │                         │ ◄───────── │ tools                   │
+ │ no write credentials    │   result   │ write credentials       │
+ └────────────┬────────────┘            └────────────┬────────────┘
+              └───────── shared project directory ───┘
+```
+
+The sandbox is untrusted: the agent and everything it writes - requests, arguments, reasons,
+any file in the project. The host is trusted: the loop, your credentials and the tools, which
+are the only way across. humangate assumes the agent may try to trick you, and relies on you
+to read what you approve.
 
 - It only gates what the sandbox can't already do. A write-enabled credential inside the
   sandbox bypasses it entirely - keep those on the host (see
@@ -185,7 +217,9 @@ humangate assumes the agent may try to trick you, and relies on you to read what
 - A request is only a tool name, arguments and a reason. The command shown to you is exactly
   the one that runs, with no shell involved. Control characters are stripped from what's shown,
   so it can't rewrite your terminal.
-- The agent can edit what the tools run; see [Guarding files](#guarding-files).
+- The agent can edit what the tools run, and turn a tool into a confused deputy. The first
+  defense is how the tool is written (see [Tools](#tools)); the second is
+  [guarding files](#guarding-files).
 - Tools run with your full environment, so a tool's argument checks are what keeps it from
   doing more than its name says.
 - The loop refuses to start inside a workmux sandbox (`WM_SANDBOX_GUEST` set).

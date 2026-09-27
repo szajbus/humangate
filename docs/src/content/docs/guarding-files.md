@@ -6,8 +6,9 @@ description: How the loop watches the files the agent could use to subvert your 
 Your "yes" is only as good as what the approved command runs, and the agent can edit much of
 that: the tools, git hooks and config (a `pre-push` hook or `core.sshCommand` can run
 anything), and whatever else your tools reach into - `package.json` scripts, a `Makefile`, CI
-workflows, an `.envrc`, etc. So the loop guards these files: it remembers their state when it
-starts, and checks them every couple of seconds and before each request.
+workflows, an `.envrc`, etc. A tool that runs such a file is a *confused deputy*: it acts on
+the agent's code with your credentials. So the loop guards these files: it remembers their
+state when it starts, and checks them every couple of seconds and before each request.
 
 Always guarded: the project's tools, git hooks (including `core.hooksPath`), the repository's git config
 except `branch.*` (git writes those itself), and `.humangate/guard` - the project's list of
@@ -34,6 +35,9 @@ Keep in mind:
 
 - It detects, it doesn't prevent: the agent can still write the files, humangate just refuses
   to act until you've seen the change.
+- It doesn't follow code. Guarding `package.json` doesn't cover the script it runs, or what
+  that script imports. List the entry points; for a tool that runs much of the project's code,
+  run a reviewed ref instead (see [Tools that run project code](/tools/#tools-that-run-project-code)).
 - Switching branches or rebasing changes tracked files like `package.json`, so expect to review
   those diffs after such git work.
 - Every file is re-read on each check - fine for tens of files, slow for something like
