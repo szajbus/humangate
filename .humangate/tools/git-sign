@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: sign <branch>
+# Usage: git-sign <branch>
 #
 # Re-signs every commit <branch> has on top of the base branch (main, or
 # $HUMANGATE_BASE_BRANCH), in place - the base stays where it is - and moves
@@ -15,9 +15,9 @@ if [ "${1:-}" = --help ]; then
   exit 0
 fi
 
-fail() { echo "sign: $*" >&2; exit 2; }
+fail() { echo "git-sign: $*" >&2; exit 2; }
 
-[ $# -eq 1 ] || fail "usage: sign <branch>"
+[ $# -eq 1 ] || fail "usage: git-sign <branch>"
 branch=$1
 current=$(git symbolic-ref --quiet --short HEAD || true)
 [ "$branch" = "$current" ] || fail "works on the branch checked out here (${current:-detached HEAD}), not '$branch'"

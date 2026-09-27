@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Usage: git-push-with-force <branch> [<branch>...]
+#
+# Force-pushes (with lease) existing local branches to origin, replacing
+# their history there - for a branch rewritten by a rebase. Never main or
+# master; the lease refuses if origin moved since the last fetch.
+set -euo pipefail
+
+if [ "${1:-}" = --help ]; then
+  awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
+  exit 0
+fi
+
+fail() { echo "git-push-with-force: $*" >&2; exit 2; }
+
+[ $# -ge 1 ] || fail "usage: git-push-with-force <branch> [<branch>...]"
+for branch in "$@"; do
+  case "$branch" in
+    main | master) fail "refusing to force-push $branch - use git-push" ;;
+    -*) fail "not a branch name: '$branch'" ;;
+  esac
+  git show-ref --verify --quiet "refs/heads/$branch" || fail "no local branch '$branch'"
+done
+
+exec git push --force-with-lease origin "$@"

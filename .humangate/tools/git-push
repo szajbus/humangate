@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Usage: git-push <branch> [<branch>...]
+#
+# Pushes existing local branches to origin - no force, so git itself
+# refuses anything but a fast-forward or a new branch. Use git-push-with-force
+# for a branch whose history was rewritten (after a rebase, say).
+set -euo pipefail
+
+if [ "${1:-}" = --help ]; then
+  awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
+  exit 0
+fi
+
+fail() { echo "git-push: $*" >&2; exit 2; }
+
+[ $# -ge 1 ] || fail "usage: git-push <branch> [<branch>...]"
+for branch in "$@"; do
+  case "$branch" in -*) fail "not a branch name: '$branch'" ;; esac
+  git show-ref --verify --quiet "refs/heads/$branch" || fail "no local branch '$branch'"
+done
+
+exec git push origin "$@"

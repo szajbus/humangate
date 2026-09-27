@@ -16,10 +16,10 @@ Usage:
   humangate wait <request-id>                           (after a timeout)
   humangate version
 
-init adds ready-made tools (sign, push) to .humangate/tools/ - or with
---global to ~/.humangate/tools/ on the host, for every project - picked from
-a checklist or named as arguments; it never overwrites a changed tool
-without --force. In a project it can also add instructions for the agent
+init adds ready-made tools (git-sign, git-push, git-push-with-force) to
+.humangate/tools/ - or with --global to ~/.humangate/tools/ on the host, for
+every project - picked from a checklist or named as arguments; it never
+overwrites a changed tool without --force. In a project it can also add instructions for the agent
 (--instructions): in .humangate/AGENTS.md, with a one-line reference from the
 project's AGENTS.md.
 
@@ -729,10 +729,10 @@ def cmd_loop(argv):
 # Tools `humangate init` can add to a project, kept here so the installed
 # script is all there is. Each: (summary, file contents).
 STARTER_TOOLS = {
-    "sign": (
+    "git-sign": (
         "re-sign a branch's commits in place (after a rebase, say)",
         r'''#!/usr/bin/env bash
-# Usage: sign <branch>
+# Usage: git-sign <branch>
 #
 # Re-signs every commit <branch> has on top of the base branch (main, or
 # $HUMANGATE_BASE_BRANCH), in place - the base stays where it is - and moves
@@ -748,9 +748,9 @@ if [ "${1:-}" = --help ]; then
   exit 0
 fi
 
-fail() { echo "sign: $*" >&2; exit 2; }
+fail() { echo "git-sign: $*" >&2; exit 2; }
 
-[ $# -eq 1 ] || fail "usage: sign <branch>"
+[ $# -eq 1 ] || fail "usage: git-sign <branch>"
 branch=$1
 current=$(git symbolic-ref --quiet --short HEAD || true)
 [ "$branch" = "$current" ] || fail "works on the branch checked out here (${current:-detached HEAD}), not '$branch'"
@@ -781,14 +781,14 @@ echo
 exec git rebase --force-rebase --gpg-sign --update-refs "${onto[@]}"
 ''',
     ),
-    "push": (
-        "force-push branches with lease; main/master only as fast-forwards",
+    "git-push": (
+        "push branches to origin, without force",
         r'''#!/usr/bin/env bash
-# Usage: push <branch> [<branch>...]
+# Usage: git-push <branch> [<branch>...]
 #
-# Force-pushes (with lease) existing local branches to origin. main and
-# master are never force-pushed over: once on origin, they're only pushed
-# when that's a fast-forward.
+# Pushes existing local branches to origin - no force, so git itself
+# refuses anything but a fast-forward or a new branch. Use git-push-with-force
+# for a branch whose history was rewritten (after a rebase, say).
 set -euo pipefail
 
 if [ "${1:-}" = --help ]; then
@@ -796,17 +796,38 @@ if [ "${1:-}" = --help ]; then
   exit 0
 fi
 
-fail() { echo "push: $*" >&2; exit 2; }
+fail() { echo "git-push: $*" >&2; exit 2; }
 
-[ $# -ge 1 ] || fail "usage: push <branch> [<branch>...]"
+[ $# -ge 1 ] || fail "usage: git-push <branch> [<branch>...]"
+for branch in "$@"; do
+  case "$branch" in -*) fail "not a branch name: '$branch'" ;; esac
+  git show-ref --verify --quiet "refs/heads/$branch" || fail "no local branch '$branch'"
+done
+
+exec git push origin "$@"
+''',
+    ),
+    "git-push-with-force": (
+        "force-push rewritten branches with lease, never main/master",
+        r'''#!/usr/bin/env bash
+# Usage: git-push-with-force <branch> [<branch>...]
+#
+# Force-pushes (with lease) existing local branches to origin, replacing
+# their history there - for a branch rewritten by a rebase. Never main or
+# master; the lease refuses if origin moved since the last fetch.
+set -euo pipefail
+
+if [ "${1:-}" = --help ]; then
+  awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
+  exit 0
+fi
+
+fail() { echo "git-push-with-force: $*" >&2; exit 2; }
+
+[ $# -ge 1 ] || fail "usage: git-push-with-force <branch> [<branch>...]"
 for branch in "$@"; do
   case "$branch" in
-    main | master)
-      if published=$(git rev-parse --quiet --verify "refs/remotes/origin/$branch"); then
-        git merge-base --is-ancestor "$published" "refs/heads/$branch" 2>/dev/null ||
-          fail "refusing to force-push $branch: it isn't a fast-forward of origin/$branch"
-      fi
-      ;;
+    main | master) fail "refusing to force-push $branch - use git-push" ;;
     -*) fail "not a branch name: '$branch'" ;;
   esac
   git show-ref --verify --quiet "refs/heads/$branch" || fail "no local branch '$branch'"
@@ -970,7 +991,7 @@ def cmd_init(argv):
     if not names and not add_instructions:
         if not sys.stdin.isatty():
             usage(
-                f"name what to add, e.g. `humangate init --instructions sign push` "
+                f"name what to add, e.g. `humangate init --instructions git-sign git-push` "
                 f"(tools: {', '.join(STARTER_TOOLS)})"
             )
         notes = {"new": "", "same": dim(" (already added)"), "differs": dim(" (yours differs - kept unless --force)")}

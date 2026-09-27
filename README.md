@@ -8,7 +8,7 @@ until you say yes.
 In the sandbox, the agent asks:
 
 ```
-$ humangate request --reason "Rebased onto main; signatures were lost" sign my-branch
+$ humangate request --reason "Rebased onto main; signatures were lost" git-sign my-branch
 humangate: request 4f93b1686d8a3142 sent; waiting for approval on the host...
 ```
 
@@ -17,7 +17,7 @@ On the host, you decide:
 ```
 $ humangate loop
 humangate loop watching /home/me/project/.humangate/queue (Ctrl-C to stop)
-Tools: push, sign
+Tools: git-push, git-push-with-force, git-sign
 Log: /home/me/.humangate/logs/home-me-project.jsonl
 
 
@@ -25,7 +25,7 @@ Log: /home/me/.humangate/logs/home-me-project.jsonl
 
 Rebased onto main; signatures were lost
 
-.humangate/tools/sign my-branch
+.humangate/tools/git-sign my-branch
 
 Run it? (↑/↓ and Enter, or a shortcut letter)
     n  No
@@ -71,7 +71,7 @@ survives either side restarting. The price is polling - an answer takes up to a 
 ## Use
 
 1. Give the project some tools: executables in `.humangate/tools/`. `humangate init` adds
-   ready-made ones - `sign` and `push` - picked from a checklist; `humangate init --global`
+   ready-made ones - `git-sign`, `git-push` and `git-push-with-force` - picked from a checklist; `humangate init --global`
    adds them to `~/.humangate/tools/` on the host instead, for every project. Write your own for
    anything else (see [Tools](#tools)).
 2. On the host, in the project directory, start the loop and keep it open:
@@ -135,7 +135,7 @@ answers at once, like `ping`. Without a running loop it lists only the project's
 - Validate every argument - they come from the agent. Refuse anything unexpected with a
   non-zero exit and a message on stderr.
 - Keep it small and specific, so the command you're asked to approve says exactly what will
-  happen. A `push <branch>` tool is easy to review; a `git <anything>` tool isn't.
+  happen. A `git-push <branch>` tool is easy to review; a `git <anything>` tool isn't.
 
 ## Security
 
