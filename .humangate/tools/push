@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Usage: push <branch> [<branch>...]
+#
+# Force-pushes (with lease) existing local branches to origin. main and
+# master are never force-pushed over: once on origin, they're only pushed
+# when that's a fast-forward.
+set -euo pipefail
+
+if [ "${1:-}" = --help ]; then
+  awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
+  exit 0
+fi
+
+fail() { echo "push: $*" >&2; exit 2; }
+
+[ $# -ge 1 ] || fail "usage: push <branch> [<branch>...]"
+for branch in "$@"; do
+  case "$branch" in
+    main | master)
+      if published=$(git rev-parse --quiet --verify "refs/remotes/origin/$branch"); then
+        git merge-base --is-ancestor "$published" "refs/heads/$branch" 2>/dev/null ||
+          fail "refusing to force-push $branch: it isn't a fast-forward of origin/$branch"
+      fi
+      ;;
+    -*) fail "not a branch name: '$branch'" ;;
+  esac
+  git show-ref --verify --quiet "refs/heads/$branch" || fail "no local branch '$branch'"
+done
+
+exec git push --force-with-lease origin "$@"

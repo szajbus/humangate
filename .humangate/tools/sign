@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Usage: sign <branch>
+#
+# Re-signs every commit <branch> has on top of the base branch (main, or
+# $HUMANGATE_BASE_BRANCH), in place - the base stays where it is - and moves
+# stacked branches pointing into that range along with it. <branch> must be
+# checked out in this worktree, with no uncommitted changes.
+#
+# On the base branch itself it re-signs only the commits not on origin yet
+# (all of them in a new repository), never published history.
+set -euo pipefail
+
+if [ "${1:-}" = --help ]; then
+  awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
+  exit 0
+fi
+
+fail() { echo "sign: $*" >&2; exit 2; }
+
+[ $# -eq 1 ] || fail "usage: sign <branch>"
+branch=$1
+current=$(git symbolic-ref --quiet --short HEAD || true)
+[ "$branch" = "$current" ] || fail "works on the branch checked out here (${current:-detached HEAD}), not '$branch'"
+[ -z "$(git status --porcelain --untracked-files=no)" ] || fail "the worktree has uncommitted changes"
+
+base_branch=${HUMANGATE_BASE_BRANCH:-main}
+if [ "$branch" = "$base_branch" ]; then
+  if published=$(git rev-parse --quiet --verify "refs/remotes/origin/$branch"); then
+    git merge-base --is-ancestor "$published" "$branch" ||
+      fail "'$branch' has diverged from origin/$branch"
+    range="$published..$branch"
+    onto=("$published")
+  else
+    range=$branch
+    onto=(--root)
+  fi
+else
+  base=$(git merge-base "$base_branch" "$branch")
+  range="$base..$branch"
+  onto=("$base")
+fi
+[ -n "$(git rev-list "$range")" ] || fail "'$branch' has no commits on top of $base_branch"
+[ -z "$(git rev-list --merges "$range")" ] || fail "'$branch' contains merge commits; only linear history is supported"
+
+echo "Re-signing:"
+git log --reverse --format='  %h %s' "$range"
+echo
+exec git rebase --force-rebase --gpg-sign --update-refs "${onto[@]}"
