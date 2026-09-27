@@ -58,9 +58,9 @@ running tool); while idle it stops the loop. Decisions are logged on the
 host, one file per project directory, in ~/.humangate/logs/.
 
 The agent can write to the project directory, including the tools and what
-they run. So loop guards those files: the tools, git hooks, the repo's git
-config, .humangate/guard itself and whatever that file lists (one path or
-glob per line; directories count recursively). It keeps their approved state
+they run. So loop guards those files in the project: its tools, git hooks,
+the repo's git config, .humangate/guard itself and whatever that file lists
+(one path or glob per line; directories count recursively). It keeps their approved state
 in memory - the state at start, at first - and checks it every couple of
 seconds and before each request. A change shows up at once as a diff, with a
 choice: accept it as the approved state, or refuse requests until it's
@@ -229,33 +229,35 @@ def guard_entries(text):
 
 def guarded_roots(worktree, guard_text):
     """What the loop guards, as (shown name, path or glob, is a glob): what an
-    approved tool effectively runs. Always the tools - global ones too, in
-    case the sandbox can reach the host's home after all - the guard file
+    approved tool effectively runs. Always the project's tools, the guard file
     itself, and git hooks, which can make any git command run arbitrary
     programs (the repo's git config is guarded apart from these). Then the
     project's own entries, from the guard file's approved text, so dropping
-    one takes a review like any other change."""
-    common = git_path(worktree, "rev-parse", "--git-common-dir")
-    paths = [
-        *(directory for _, directory in tool_dirs(worktree)),
-        os.path.join(worktree, GUARD_FILE),
-        os.path.join(common, "hooks"),
-    ]
+    one takes a review like any other change.
+
+    Only what's in the project (its worktree and git directory): anything
+    outside - global tools, a core.hooksPath in the home directory - is shared
+    by every loop on the host, and each would ask about the same change."""
+    common = os.path.normpath(git_path(worktree, "rev-parse", "--git-common-dir"))
+    paths = [os.path.join(worktree, ".humangate", "tools"), os.path.join(worktree, GUARD_FILE), os.path.join(common, "hooks")]
     hooks_path = subprocess.run(
         ["git", "config", "core.hooksPath"], cwd=worktree, capture_output=True, text=True
     ).stdout.strip()
     if hooks_path:
-        paths.append(os.path.join(worktree, os.path.expanduser(hooks_path)))
+        hooks_path = os.path.normpath(os.path.join(worktree, os.path.expanduser(hooks_path)))
+        if any(hooks_path == d or hooks_path.startswith(d + os.sep) for d in (worktree, common)):
+            paths.append(hooks_path)
     roots = [(display_path(path, worktree), os.path.normpath(path), False) for path in paths]
     for entry in guard_entries(guard_text):
         # Relative to the project root (a leading / too, as in .gitignore),
-        # or to the host's home with ~/.
-        base, rest = (os.path.expanduser("~"), entry[2:]) if entry.startswith("~/") else (worktree, entry)
-        rest = rest.strip("/")
+        # and never out of it.
+        rest = entry.strip("/")
+        if ".." in rest.split("/"):
+            continue
         if re.search(r"[*?[]", rest):
-            roots.append((entry, os.path.join(glob.escape(base), rest), True))
+            roots.append((entry, os.path.join(glob.escape(worktree), rest), True))
         else:
-            roots.append((entry, os.path.normpath(os.path.join(base, rest)), False))
+            roots.append((entry, os.path.normpath(os.path.join(worktree, rest)), False))
     unique = []
     for root in roots:
         if all(root[1:] != seen[1:] for seen in unique):
@@ -1217,9 +1219,8 @@ GUARD_HEADER = """\
 # Files `humangate loop` guards on top of the built-in ones - its tools, this
 # file, git hooks and the repository's git config: whatever the tools run or
 # read, which the agent could change. One path or glob per line, relative to
-# the project root (~/ for the host's home); a directory covers everything in
-# it. The loop shows a change as a diff and refuses requests until the person
-# accepts it.
+# the project root; a directory covers everything in it. The loop shows a
+# change as a diff and refuses requests until the person accepts it.
 """
 # What init suggests guarding, when the project has it: files that build
 # tools, task runners, CI and the shell run as code.

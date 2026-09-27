@@ -23,7 +23,7 @@ On the host, you decide:
 $ humangate loop
 humangate loop watching /home/me/project/.humangate/queue (Ctrl-C to stop)
 Tools: git-push, git-push-with-force, git-sign
-Guarding: git config, .humangate/tools, ~/.humangate/tools, .humangate/guard, .git/hooks, package.json (18 files)
+Guarding: git config, .humangate/tools, .humangate/guard, .git/hooks, package.json (18 files)
 Log: /home/me/.humangate/logs/home-me-project.jsonl
 
 
@@ -145,11 +145,10 @@ anything), and whatever else your tools reach into - `package.json` scripts, a `
 workflows, an `.envrc`, etc. So the loop guards these files: it remembers their state when it
 starts, and checks them every couple of seconds and before each request.
 
-Always guarded: the tools, git hooks (including `core.hooksPath`), the repository's git config
+Always guarded: the project's tools, git hooks (including `core.hooksPath`), the repository's git config
 except `branch.*` (git writes those itself), and `.humangate/guard` - the project's list of
 more paths to guard. It takes one path or glob per line (`**` matches any depth), relative to
-the project root or, with `~/`, to your home on the host. A directory covers everything in it;
-`#` starts a comment:
+the project root. A directory covers everything in it; `#` starts a comment:
 
 ```
 # Files humangate loop guards on top of the built-in ones ...
