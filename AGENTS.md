@@ -10,6 +10,9 @@ shows them any change. See `README.md` for what it does and how it's used.
 - `bin/humangate` - the whole program: one Python script, both the agent side (`request`,
   `tools`, `ping`, `wait`) and the person's side (`loop`).
 - `install.sh` - the `curl | sh` installer; downloads `bin/humangate` from GitHub.
+- `docs/` - the documentation site (Astro Starlight), deployed to GitHub Pages by
+  `.github/workflows/docs.yml`. Its pages follow the README's sections - keep the two in sync -
+  plus a page on the starter tools, to update when `STARTER_TOOLS` changes.
 - Starter tools (`git-sign`, `git-push`, `git-push-with-force`) live inside `bin/humangate`, in `STARTER_TOOLS`, so the
   installed script is self-contained; `humangate init` writes them into a project, or with
   `--global` into `~/.humangate/tools/` on the host.

@@ -1,0 +1,41 @@
+---
+title: Getting started
+description: Install humangate on the host and in the sandbox, and set up a project.
+---
+
+## Install
+
+On the host, and inside the sandbox the agent runs in:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/szajbus/humangate/main/install.sh | sh
+```
+
+It installs a single Python script to `~/.local/bin/humangate` (`HUMANGATE_BIN_DIR` to
+change), and needs Python 3.8+ and git. Run it again to update.
+
+The project directory has to be shared between the sandbox and the host, writable from both -
+requests travel through `.humangate/queue/` in it. Most VM and container sandboxes mount the
+project that way already. It's the one channel every sandbox has, so there's no port to open
+or token to hand out; the price is polling - an answer takes up to a second.
+
+
+## Set up a project
+
+1. Give the project some tools: executables in `.humangate/tools/`. `humangate init` adds
+   ready-made ones - `git-sign`, `git-push` and `git-push-with-force` - picked from a
+   checklist; `humangate init --global` adds them to `~/.humangate/tools/` on the host instead,
+   for every project (see [Starter tools](/starter-tools/)). Write your own for anything else
+   (see [Tools](/tools/)).
+2. On the host, in the project directory, start the loop and keep it open:
+   ```bash
+   humangate loop
+   ```
+3. Tell the agent about it. `humangate init` offers to: it writes the instructions to
+   `.humangate/AGENTS.md` and adds a reference to it to the project's `AGENTS.md`.
+4. Optionally, list the files your tools run or read in `.humangate/guard`, so the loop tells
+   you when the agent changes them (see [Guarding files](/guarding-files/)). `humangate init`
+   offers a starter list based on what it finds in the project.
+
+Every project directory - every git worktree, too - has its own queue, so run one loop per
+agent session.

