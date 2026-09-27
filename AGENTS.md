@@ -1,7 +1,9 @@
 # AGENTS.md
 
-humangate lets a sandboxed coding agent ask the person at the host to run one of a project's
-tools, and runs it only after they approve. See `README.md` for what it does and how it's used.
+humangate keeps the person at the host in the loop for what a sandboxed coding agent can't be
+trusted to do alone. The agent asks them to run one of a project's tools, which runs only after
+they approve. Meanwhile the loop watches the files the agent could change behind their back and
+shows them any change. See `README.md` for what it does and how it's used.
 
 ## Layout
 

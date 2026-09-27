@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""humangate - let a sandboxed agent ask a person to run a trusted tool.
+"""humangate - keep a person in the loop for what a sandboxed agent can't be
+trusted to do alone.
 
 An agent in a sandbox can't do some things itself - sign commits, push -
 because the keys stay on the host. It requests one of the project's tools
 (executables in .humangate/tools/); the person, running `humangate loop` on
-the host in the same project directory, sees the request and decides.
+the host in the same project directory, sees the request and decides. The
+same loop watches the files the agent could change to subvert that - the
+tools, git hooks and config, whatever .humangate/guard lists - and shows the
+person any change.
 
 Usage:
   humangate loop                                        (the person, on the host)
