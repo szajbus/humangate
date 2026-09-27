@@ -1,0 +1,1059 @@
+#!/usr/bin/env python3
+"""humangate - let a sandboxed agent ask a person to run a trusted tool.
+
+An agent in a sandbox can't do some things itself - sign commits, push -
+because the keys stay on the host. It requests one of the project's tools
+(executables in .humangate/tools/); the person, running `humangate loop` on
+the host in the same project directory, sees the request and decides.
+
+Usage:
+  humangate loop                                        (the person, on the host)
+  humangate init [--global] [--force] [--instructions] [<tool>...]
+                                                        (set a project up)
+  humangate request --reason "<why>" <tool> [<arg>...]  (the agent)
+  humangate tools [<tool>]                              (what can be requested)
+  humangate ping                                        (is the loop running?)
+  humangate wait <request-id>                           (after a timeout)
+  humangate version
+
+init adds ready-made tools (sign, push) to .humangate/tools/ - or with
+--global to ~/.humangate/tools/ on the host, for every project - picked from
+a checklist or named as arguments; it never overwrites a changed tool
+without --force. In a project it can also add instructions for the agent
+(--instructions): in .humangate/AGENTS.md, with a one-line reference from the
+project's AGENTS.md.
+
+Tools come from the project's .humangate/tools/ and the host's
+~/.humangate/tools/; a project tool overrides a global one of the same name.
+The sandbox can't see the host's home, so `tools` asks the loop for the
+list (answered at once, like ping) and, without a loop, shows only what's
+visible locally.
+
+request options (before <tool>): --reason <text> (required), --timeout <s>.
+<tool> is an executable in .humangate/tools/; its arguments are passed to it
+as-is and it validates them itself. `tools` lists them with their usage,
+read from the comment header at the top of each file - nothing is run.
+
+request prints the tool's output and exits with its exit code. Exit 3 means
+the request was rejected or invalid; exit 4 means no answer arrived in time;
+exit 5 means the person replied with a message instead of running it
+(printed - read it and act on it); exit 130 means it was cancelled.
+
+loop shows each request's reason and exact command, then a menu (arrow keys
+and Enter, or the shortcut letter):
+
+  n  reject it (the default, so a stray Enter never runs anything)
+  y  run it in your environment and send the output back
+  a  same, and run this exact command again without asking for as long as
+     this loop keeps running
+  r  type a reply that goes back to the agent, without running anything
+
+Ctrl-C while a request is up cancels just that request (or interrupts its
+running tool); while idle it stops the loop. Decisions are logged on the
+host, one file per project directory, in ~/.humangate/logs/.
+
+The agent can write to the project directory, including the tools and the
+git config and hooks they'd run with. So loop fingerprints those at start
+and refuses requests once any of them changed - review the change, then
+restart the loop to accept it.
+
+Requests travel through .humangate/queue/ in the project directory (the git
+worktree root), which the sandbox and the host must both be able to write.
+"""
+
+import datetime
+import hashlib
+import json
+import os
+import re
+import secrets
+import shlex
+import signal
+import subprocess
+import sys
+import termios
+import time
+import tty
+
+VERSION = "0.1.0"
+
+EXIT_USAGE = 2
+EXIT_REJECTED = 3
+EXIT_TIMEOUT = 4
+EXIT_REPLIED = 5
+EXIT_CANCELLED = 130
+# Just under the 10-minute limit some agents (e.g. Claude Code) put on a single
+# shell command, so `request` reports the timeout itself instead of being killed.
+DEFAULT_TIMEOUT = 540
+POLL_SECONDS = 0.5
+PROGRESS_SECONDS = 30
+TOOLS_TIMEOUT = 3
+MAX_OUTPUT_CHARS = 64_000
+MAX_REASON_CHARS = 2_000
+REQUEST_ID = re.compile(r"^[0-9a-f]{16}$")
+TOOL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+
+def usage(message):
+    print(f"humangate: {message}\n\n{__doc__}", file=sys.stderr)
+    sys.exit(EXIT_USAGE)
+
+
+def ensure_queue(root):
+    path = os.path.join(root, ".humangate", "queue")
+    os.makedirs(path, exist_ok=True)
+    # Keeps the queue out of git without asking projects to ignore it.
+    ignore = os.path.join(path, ".gitignore")
+    if not os.path.exists(ignore):
+        with open(ignore, "w") as f:
+            f.write("*\n")
+    return path
+
+
+def queue_dir():
+    root = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    return ensure_queue(root)
+
+
+
+def submit(queue, request):
+    request_id = secrets.token_hex(8)
+    write_atomically(os.path.join(queue, request_id + ".request.json"), {"id": request_id, **request})
+    return request_id
+
+
+def wait_for_result(queue, request_id, timeout):
+    request = os.path.join(queue, request_id + ".request.json")
+    claimed = os.path.join(queue, request_id + ".claimed.json")
+    result = os.path.join(queue, request_id + ".result.json")
+    started = last_progress = time.monotonic()
+
+    while not os.path.exists(result):
+        now = time.monotonic()
+        if now - started > timeout:
+            if os.path.exists(request):
+                # Not picked up yet: withdraw it so it can't be approved later
+                # without anyone waiting for the outcome.
+                os.remove(request)
+                print(
+                    "humangate: no answer - is `humangate loop` running on the host "
+                    "in this project? Request withdrawn.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"humangate: still awaiting a decision; resume with "
+                    f"humangate wait {request_id}",
+                    file=sys.stderr,
+                )
+            return EXIT_TIMEOUT
+        if now - last_progress > PROGRESS_SECONDS:
+            state = "being reviewed" if os.path.exists(claimed) else "queued"
+            print(f"humangate: request {request_id} {state}...", file=sys.stderr, flush=True)
+            last_progress = now
+        time.sleep(POLL_SECONDS)
+
+    with open(result) as f:
+        outcome = json.load(f)
+    os.remove(result)
+
+    if outcome.get("output"):
+        print(outcome["output"], end="" if outcome["output"].endswith("\n") else "\n")
+    if outcome["status"] == "done":
+        return outcome["exit_code"]
+    if outcome["status"] == "replied":
+        print(f"humangate: not run; the person replied:\n{outcome['message']}", file=sys.stderr)
+        return EXIT_REPLIED
+    message = outcome.get("message")
+    print(f"humangate: {outcome['status']}" + (f": {message}" if message else ""), file=sys.stderr)
+    return EXIT_REJECTED
+
+
+USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
+def styled(text, *codes):
+    return f"\033[{';'.join(codes)}m{text}\033[0m" if USE_COLOR else text
+
+
+def title(text):
+    return styled(text, "1", "36")  # bold cyan
+
+
+def command_style(text):
+    return styled(text, "1", "33")  # bold yellow
+
+
+def dim(text):
+    return styled(text, "2")
+
+
+class Invalid(Exception):
+    pass
+
+
+def git_path(worktree, *args):
+    out = subprocess.run(["git", *args], cwd=worktree, capture_output=True, text=True).stdout.strip()
+    return os.path.join(worktree, out) if out and not os.path.isabs(out) else out
+
+
+def watched_paths(worktree):
+    """Files an approved tool effectively runs: the tools themselves, plus git
+    config and hooks, which can make any git command run arbitrary programs.
+    Global tools are included too, in case the sandbox can reach the host's
+    home after all."""
+    common = git_path(worktree, "rev-parse", "--git-common-dir")
+    paths = [*(directory for _, directory in tool_dirs(worktree)), os.path.join(common, "hooks")]
+    hooks_path = subprocess.run(
+        ["git", "config", "core.hooksPath"], cwd=worktree, capture_output=True, text=True
+    ).stdout.strip()
+    if hooks_path:
+        paths.append(os.path.join(worktree, os.path.expanduser(hooks_path)))
+    return paths
+
+
+def repo_git_config(worktree):
+    # Repo and worktree git config, minus branch.* - git itself writes those
+    # (e.g. push.autoSetupRemote), and they can't run programs.
+    listing = subprocess.run(
+        ["git", "config", "--list", "--show-scope"], cwd=worktree, capture_output=True, text=True
+    ).stdout.splitlines()
+    return sorted(
+        line for line in listing
+        if line.split("\t", 1)[0] in ("local", "worktree")
+        and not line.split("\t", 1)[-1].startswith("branch.")
+    )
+
+
+def fingerprint(worktree, paths):
+    digest = {"git config": hashlib.sha256("\n".join(repo_git_config(worktree)).encode()).hexdigest()}
+    for root in paths:
+        if os.path.isfile(root):
+            files = [root]
+        elif os.path.isdir(root):
+            files = [os.path.join(d, f) for d, _, names in os.walk(root) for f in names]
+        else:
+            digest[root] = None
+            continue
+        for path in files:
+            with open(path, "rb") as f:
+                digest[path] = (hashlib.sha256(f.read()).hexdigest(), os.stat(path).st_mode)
+    return digest
+
+
+def changed_since(worktree, snapshot, paths):
+    current = fingerprint(worktree, paths)
+    return sorted(p for p in set(snapshot) | set(current) if snapshot.get(p) != current.get(p))
+
+
+def global_tools_dir():
+    return os.path.expanduser("~/.humangate/tools")
+
+
+def tool_dirs(worktree):
+    # Project first: a project tool overrides a global one of the same name.
+    return [("project", os.path.join(worktree, ".humangate", "tools")), ("global", global_tools_dir())]
+
+
+def tools_in(directory):
+    if not os.path.isdir(directory):
+        return {}
+    found = {}
+    for name in sorted(os.listdir(directory)):
+        path = os.path.join(directory, name)
+        if TOOL_NAME.match(name) and os.path.isfile(path) and os.access(path, os.X_OK):
+            found[name] = path
+    return found
+
+
+def available_tools(worktree):
+    """name -> (scope, path), project tools overriding global ones."""
+    tools = {}
+    for scope, directory in reversed(tool_dirs(worktree)):
+        for name, path in tools_in(directory).items():
+            tools[name] = (scope, path)
+    return dict(sorted(tools.items()))
+
+
+def display_path(path, worktree):
+    if path.startswith(worktree + os.sep):
+        return os.path.relpath(path, worktree)
+    home = os.path.expanduser("~")
+    if path.startswith(home + os.sep):
+        return "~/" + os.path.relpath(path, home)
+    return path
+
+
+def resolve_tool(worktree, name):
+    if not isinstance(name, str) or not TOOL_NAME.match(name):
+        raise Invalid(f"not a valid tool name: {name!r}")
+    for _, directory in tool_dirs(worktree):
+        real = os.path.realpath(directory)
+        path = os.path.join(real, name)
+        if not os.path.lexists(path):
+            continue
+        if os.path.islink(path) or os.path.dirname(os.path.realpath(path)) != real:
+            raise Invalid(f"tool {name!r} must be a file in its tools directory, not a link")
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    available = ", ".join(available_tools(worktree)) or "none"
+    raise Invalid(f"no tool {name!r} (available: {available})")
+
+
+def tool_help(path):
+    """The comment block at the top of a tool (after the shebang), which by
+    convention starts with a `Usage:` line and describes what the tool does.
+    Read from the file, never by running it."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except (UnicodeDecodeError, OSError):
+        return None
+    if lines and lines[0].startswith("#!"):
+        lines = lines[1:]
+    header = []
+    for line in lines:
+        if not line.startswith("#"):
+            break
+        header.append(line[2:] if line.startswith("# ") else line[1:])
+    return "\n".join(header).strip() or None
+
+
+def describe_tools(worktree, name=None):
+    """What `humangate tools` prints: each tool's help header, marked when it
+    comes from ~/.humangate/tools. Returns (exit code, text)."""
+    tools = available_tools(worktree)
+    shadowed = set(tools_in(global_tools_dir())) & set(tools_in(tool_dirs(worktree)[0][1]))
+    if name is not None:
+        if name not in tools:
+            return EXIT_USAGE, f"no tool {name!r} (available: {', '.join(tools) or 'none'})\n"
+        tools = {name: tools[name]}
+    if not tools:
+        return 0, "No tools in .humangate/tools/ or ~/.humangate/tools/.\n"
+    blocks = []
+    for tool, (scope, path) in tools.items():
+        label = f"{tool} (global)" if scope == "global" else tool
+        if tool in shadowed:
+            label += " (overrides the global one)"
+        text = tool_help(path) or "(no description - add a comment header with a Usage: line)"
+        blocks.append(f"{label}:\n" + "\n".join(f"  {line}".rstrip() for line in text.splitlines()))
+    return 0, "\n\n".join(blocks) + "\n"
+
+
+def cmd_tools(argv):
+    if len(argv) > 1:
+        usage("tools takes at most one tool name")
+    name = argv[0] if argv else None
+    # Global tools live on the host, out of the sandbox's sight, so ask the
+    # loop - it answers at once, like ping. Without a loop, list what's
+    # visible here.
+    queue = queue_dir()
+    request_id = submit(queue, {"kind": "tools", "name": name})
+    request = os.path.join(queue, request_id + ".request.json")
+    result = os.path.join(queue, request_id + ".result.json")
+    started = time.monotonic()
+    while not os.path.exists(result):
+        waited = time.monotonic() - started
+        # A claimed request is answered at once, so wait a little longer for
+        # it - but not forever, in case the loop died right after claiming.
+        if waited > TOOLS_TIMEOUT and (os.path.exists(request) or waited > 10 * TOOLS_TIMEOUT):
+            try:
+                os.remove(request)
+            except FileNotFoundError:
+                pass  # claimed just now, or long ago by a loop that died
+            print(
+                "humangate: no answer from `humangate loop`, so this lists only the tools visible "
+                "here - global ones on the host are missing.\n",
+                file=sys.stderr,
+            )
+            exit_code, text = describe_tools(worktree_root(), name)
+            print(text, end="")
+            return exit_code
+        time.sleep(POLL_SECONDS / 5)
+    with open(result) as f:
+        outcome = json.load(f)
+    os.remove(result)
+    print(outcome.get("output", ""), end="")
+    return outcome.get("exit_code", 0)
+
+
+def clean_text(text, required):
+    if not isinstance(text, str) or (required and not text.strip()):
+        raise Invalid("request has no reason")
+    # Drop control characters (keeping newlines) so a request can't rewrite
+    # what the terminal shows.
+    return "".join(ch for ch in text if ch == "\n" or ch.isprintable()).strip()[:MAX_REASON_CHARS]
+
+
+def write_atomically(path, payload):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f)
+    os.replace(tmp, path)
+
+
+def log_path(worktree):
+    # One log per project directory, kept on the host - a log inside the
+    # project would be writable by the agent it's recording.
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", worktree.strip("/")) or "root"
+    return os.path.join(os.path.expanduser("~/.humangate/logs"), name + ".jsonl")
+
+
+def log(worktree, entry):
+    path = log_path(worktree)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    entry["at"] = datetime.datetime.now().isoformat(timespec="seconds")
+    with open(path, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def ask(prompt):
+    try:
+        return input(prompt)
+    except EOFError:
+        return ""
+
+
+CHOICES = [
+    ("no", "n", "No"),
+    ("yes", "y", "Yes, run it"),
+    ("always", "a", "Yes, and don't ask again for this exact command (until restart)"),
+    ("reply", "r", "Reply to the agent instead..."),
+]
+DEFAULT_CHOICE = 0  # "No" - an accidental Enter never runs anything
+
+
+def choose():
+    """Arrow-key menu (or its shortcut letters); returns (choice, reply text)."""
+    if not sys.stdin.isatty():
+        # Piped input (tests, scripts): one line - y, a, n/empty or a reply.
+        line = ask("Run it? [y/a/N/r or reply text] ").strip()
+        by_key = {key: name for name, key, _ in CHOICES}
+        choice = by_key.get(line.lower(), "no" if not line else "reply")
+        if choice != "reply":
+            return choice, ""
+        text = ask("Reply: ").strip() if line.lower() == "r" else line
+        return ("reply", text) if text else ("no", "")
+
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    selected = DEFAULT_CHOICE
+
+    def render(first):
+        if not first:
+            sys.stdout.write(f"\033[{len(CHOICES)}A")
+        for index, (_, key, label) in enumerate(CHOICES):
+            line = f"{key}  {label}"
+            text = styled(f"❯ {line}", "1", "36") if index == selected else f"  {dim(line)}"
+            sys.stdout.write(f"\r\033[K  {text}\n")
+        sys.stdout.flush()
+
+    print(f"\n{styled('Run it?', '1', '32')} {dim('(↑/↓ and Enter, or a shortcut letter)')}")
+    sys.stdout.write("\033[?25l")  # hide the cursor while the menu is up
+    render(first=True)
+    try:
+        tty.setcbreak(fd)  # keeps Ctrl-C working, as a KeyboardInterrupt
+        while True:
+            key = os.read(fd, 3)
+            if key in (b"\x1b[A", b"k"):
+                selected = (selected - 1) % len(CHOICES)
+            elif key in (b"\x1b[B", b"j"):
+                selected = (selected + 1) % len(CHOICES)
+            elif key in (b"\r", b"\n"):
+                break
+            else:
+                shortcut = [i for i, (_, k, _) in enumerate(CHOICES) if k.encode() == key.lower()]
+                if not shortcut:
+                    continue
+                selected = shortcut[0]
+                render(first=False)
+                break
+            render(first=False)
+    except KeyboardInterrupt:
+        return "cancel", ""
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        sys.stdout.write("\033[?25h")
+        sys.stdout.flush()
+
+    choice = CHOICES[selected][0]
+    if choice == "reply":
+        try:
+            text = ask(f"{styled('Reply:', '1', '35')} ").strip()
+        except KeyboardInterrupt:
+            return "cancel", ""
+        return ("reply", text) if text else ("no", "")
+    return choice, ""
+
+
+def run(worktree, argv):
+    process = subprocess.Popen(
+        argv, cwd=worktree, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+    )
+    output = []
+    try:
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            output.append(line)
+    except KeyboardInterrupt:
+        # Ctrl-C reached the tool too (same process group); give it a moment
+        # to exit on its own before forcing it.
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        output.append("\n[interrupted with Ctrl-C by the person]\n")
+        print(styled("\nInterrupted.", "1", "31"))
+    exit_code = process.wait()
+    # A tool killed by a signal reports -N; use the shell's 128+N instead.
+    return (128 - exit_code if exit_code < 0 else exit_code), "".join(output)[-MAX_OUTPUT_CHARS:]
+
+
+class Approver:
+    def __init__(self, worktree):
+        self.worktree = worktree
+        self.queue = ensure_queue(worktree)
+        self.paths = watched_paths(worktree)
+        self.snapshot = fingerprint(worktree, self.paths)
+        # Commands answered with "a": exact (tool, args) pairs that run
+        # without asking until this process exits.
+        self.always = set()
+
+    def handle(self, request_id):
+        claimed = os.path.join(self.queue, request_id + ".claimed.json")
+        result_path = os.path.join(self.queue, request_id + ".result.json")
+        try:
+            # Claiming by rename means the agent can no longer withdraw it and
+            # can tell it's under review.
+            os.replace(os.path.join(self.queue, request_id + ".request.json"), claimed)
+        except FileNotFoundError:
+            return  # withdrawn by the agent meanwhile
+
+        def finish(outcome, **logged):
+            write_atomically(result_path, outcome)
+            log(self.worktree, {"id": request_id, **logged})
+            os.remove(claimed)
+
+        try:
+            with open(claimed) as f:
+                request = json.load(f)
+            if request.get("kind") == "tools":
+                # Reads help headers only, so it needs no approval either.
+                name = request.get("name")
+                exit_code, text = describe_tools(self.worktree, name if isinstance(name, str) else None)
+                print(dim(f"\nTools list {request_id} answered."))
+                write_atomically(result_path, {"status": "done", "exit_code": exit_code, "output": text})
+                os.remove(claimed)
+                return
+            if request.get("kind") == "ping":
+                # Runs nothing, so it needs no approval.
+                print(dim(f"\nPing {request_id} answered."))
+                finish({"status": "done", "exit_code": 0, "output": "pong from host\n"}, kind="ping")
+                return
+            if request.get("kind") != "run":
+                raise Invalid(f"unknown request kind {request.get('kind')!r}")
+            changed = changed_since(self.worktree, self.snapshot, self.paths)
+            if changed:
+                raise Invalid(
+                    "changed since humangate loop started (the person has to review it and "
+                    "restart the loop): "
+                    + ", ".join(p if p == "git config" else display_path(p, self.worktree) for p in changed)
+                )
+            tool = resolve_tool(self.worktree, request.get("tool"))
+            args = request.get("args")
+            if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+                raise Invalid("args must be a list of strings")
+            reason = clean_text(request.get("reason"), required=True)
+        except (Invalid, ValueError) as error:
+            print(f"\n{styled('Refused an invalid request', '1', '31')} {dim(request_id)}: {error}")
+            finish({"status": "invalid", "message": str(error)}, decision="invalid", message=str(error))
+            return
+
+        argv = [tool, *args]
+        key = tuple(argv)
+        entry = {"tool": request["tool"], "args": args, "reason": reason}
+        print(f"\n\n{title(f'── Request {request_id} ──')}\n")
+        print(reason)
+        print()
+        # The path isn't quoted, so ~ stays readable; tool paths never need it.
+        shown = " ".join([display_path(tool, self.worktree), *map(shlex.quote, args)])
+        print(command_style(clean_text(shown, required=False)))
+
+        auto = key in self.always
+        if auto:
+            print("\n" + styled('Approved earlier with "always" - running.', "1", "32"))
+            choice, reply = "yes", ""
+        else:
+            choice, reply = choose()
+        print()
+
+        if choice in ("yes", "always"):
+            if choice == "always":
+                self.always.add(key)
+            exit_code, output = run(self.worktree, argv)
+            decision = "auto-approved" if auto else "approved"
+            finish(
+                {"status": "done", "exit_code": exit_code, "output": output},
+                **entry, decision=decision, exit_code=exit_code,
+            )
+            status = styled(f"Exit code {exit_code}", "1", "32" if exit_code == 0 else "31")
+            print(f"\n{status} {dim('- result sent to the agent')}")
+        elif choice == "cancel":
+            finish({"status": "rejected", "message": "cancelled with Ctrl-C"}, **entry, decision="cancelled")
+            print(styled("\nCancelled.", "1", "31") + dim(" Still watching - Ctrl-C again to stop."))
+        elif choice == "no":
+            finish({"status": "rejected", "message": ""}, **entry, decision="rejected")
+            print(styled("Rejected.", "1", "31"))
+        else:
+            # Not run; the text goes back to the agent as an answer, e.g. to ask
+            # for a different request or more context.
+            finish({"status": "replied", "message": reply}, **entry, decision="replied", message=reply)
+            print(styled("Not run - reply sent to the agent.", "1", "35"))
+
+    def pending(self):
+        requests = []
+        for name in os.listdir(self.queue):
+            if name.endswith(".request.json"):
+                request_id = name[: -len(".request.json")]
+                if REQUEST_ID.match(request_id):
+                    requests.append((os.path.getmtime(os.path.join(self.queue, name)), request_id))
+        return [request_id for _, request_id in sorted(requests)]
+
+    def release_abandoned(self):
+        # A request claimed before a crash or Ctrl-C was never decided; tell
+        # the agent instead of leaving it waiting.
+        for name in os.listdir(self.queue):
+            if name.endswith(".claimed.json"):
+                request_id = name[: -len(".claimed.json")]
+                write_atomically(
+                    os.path.join(self.queue, request_id + ".result.json"),
+                    {"status": "rejected", "message": "the approval tool stopped before a decision"},
+                )
+                os.remove(os.path.join(self.queue, name))
+
+
+def worktree_root():
+    return subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def wait_or_cancel(queue, request_id, timeout):
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        return wait_for_result(queue, request_id, timeout)
+    except KeyboardInterrupt:
+        request = os.path.join(queue, request_id + ".request.json")
+        if os.path.exists(request):
+            os.remove(request)
+            print("\nhumangate: cancelled; request withdrawn.", file=sys.stderr)
+        else:
+            print(
+                f"\nhumangate: stopped waiting; the request is already under review - "
+                f"humangate wait {request_id} to get its outcome",
+                file=sys.stderr,
+            )
+        return EXIT_CANCELLED
+
+
+def cmd_request(argv):
+    timeout = DEFAULT_TIMEOUT
+    reason = None
+    # Options come before the tool name; everything after it belongs to the tool.
+    while argv and argv[0].startswith("-"):
+        option = argv.pop(0)
+        if option not in ("--timeout", "--reason") or not argv:
+            usage(f"unknown or incomplete option {option}")
+        value = argv.pop(0)
+        if option == "--timeout":
+            timeout = int(value)
+        else:
+            reason = value
+    if not argv:
+        usage("request needs a tool name")
+    if not reason:
+        usage("--reason is required - it's what the person reviews")
+    queue = queue_dir()
+    request_id = submit(queue, {"kind": "run", "tool": argv[0], "args": argv[1:], "reason": reason})
+    print(f"humangate: request {request_id} sent; waiting for approval on the host...", file=sys.stderr, flush=True)
+    return wait_or_cancel(queue, request_id, timeout)
+
+
+def cmd_ping(argv):
+    if argv:
+        usage("ping takes no arguments")
+    queue = queue_dir()
+    return wait_or_cancel(queue, submit(queue, {"kind": "ping"}), DEFAULT_TIMEOUT)
+
+
+def cmd_wait(argv):
+    if len(argv) != 1:
+        usage("wait takes a request id")
+    return wait_or_cancel(queue_dir(), argv[0], DEFAULT_TIMEOUT)
+
+
+def cmd_loop(argv):
+    if argv:
+        usage("loop takes no arguments")
+    # WM_SANDBOX_GUEST is set inside workmux sandboxes, where a loop would run
+    # tools without the host's keys.
+    if os.environ.get("WM_SANDBOX_GUEST"):
+        sys.exit("humangate loop runs on the host, not inside the sandbox.")
+
+    worktree = worktree_root()
+    approver = Approver(worktree)
+    approver.release_abandoned()
+    # Ctrl-C raises KeyboardInterrupt even if whatever started us ignored it.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+
+    print(f"{title('humangate loop')} watching {approver.queue} {dim('(Ctrl-C to stop)')}")
+    tools = [f"{n} (global)" if scope == "global" else n for n, (scope, _) in available_tools(worktree).items()]
+    print(dim(f"Tools: {', '.join(tools) or 'none'}"))
+    print(dim(f"Log: {log_path(worktree)}"))
+    # Ctrl-C while a request is up cancels just that request (handled in
+    # choose/run); while idle it stops the loop.
+    try:
+        while True:
+            for request_id in approver.pending():
+                approver.handle(request_id)
+            time.sleep(POLL_SECONDS)
+    except KeyboardInterrupt:
+        approver.release_abandoned()
+        print("\nhumangate loop stopped.")
+    return 0
+
+
+# Tools `humangate init` can add to a project, kept here so the installed
+# script is all there is. Each: (summary, file contents).
+STARTER_TOOLS = {
+    "sign": (
+        "re-sign a branch's commits in place (after a rebase, say)",
+        r'''#!/usr/bin/env bash
+# Usage: sign <branch>
+#
+# Re-signs every commit <branch> has on top of the base branch (main, or
+# $HUMANGATE_BASE_BRANCH), in place - the base stays where it is - and moves
+# stacked branches pointing into that range along with it. <branch> must be
+# checked out in this worktree, with no uncommitted changes.
+#
+# On the base branch itself it re-signs only the commits not on origin yet
+# (all of them in a new repository), never published history.
+set -euo pipefail
+
+if [ "${1:-}" = --help ]; then
+  awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
+  exit 0
+fi
+
+fail() { echo "sign: $*" >&2; exit 2; }
+
+[ $# -eq 1 ] || fail "usage: sign <branch>"
+branch=$1
+current=$(git symbolic-ref --quiet --short HEAD || true)
+[ "$branch" = "$current" ] || fail "works on the branch checked out here (${current:-detached HEAD}), not '$branch'"
+[ -z "$(git status --porcelain --untracked-files=no)" ] || fail "the worktree has uncommitted changes"
+
+base_branch=${HUMANGATE_BASE_BRANCH:-main}
+if [ "$branch" = "$base_branch" ]; then
+  if published=$(git rev-parse --quiet --verify "refs/remotes/origin/$branch"); then
+    git merge-base --is-ancestor "$published" "$branch" ||
+      fail "'$branch' has diverged from origin/$branch"
+    range="$published..$branch"
+    onto=("$published")
+  else
+    range=$branch
+    onto=(--root)
+  fi
+else
+  base=$(git merge-base "$base_branch" "$branch")
+  range="$base..$branch"
+  onto=("$base")
+fi
+[ -n "$(git rev-list "$range")" ] || fail "'$branch' has no commits on top of $base_branch"
+[ -z "$(git rev-list --merges "$range")" ] || fail "'$branch' contains merge commits; only linear history is supported"
+
+echo "Re-signing:"
+git log --reverse --format='  %h %s' "$range"
+echo
+exec git rebase --force-rebase --gpg-sign --update-refs "${onto[@]}"
+''',
+    ),
+    "push": (
+        "force-push branches with lease; main/master only as fast-forwards",
+        r'''#!/usr/bin/env bash
+# Usage: push <branch> [<branch>...]
+#
+# Force-pushes (with lease) existing local branches to origin. main and
+# master are never force-pushed over: once on origin, they're only pushed
+# when that's a fast-forward.
+set -euo pipefail
+
+if [ "${1:-}" = --help ]; then
+  awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
+  exit 0
+fi
+
+fail() { echo "push: $*" >&2; exit 2; }
+
+[ $# -ge 1 ] || fail "usage: push <branch> [<branch>...]"
+for branch in "$@"; do
+  case "$branch" in
+    main | master)
+      if published=$(git rev-parse --quiet --verify "refs/remotes/origin/$branch"); then
+        git merge-base --is-ancestor "$published" "refs/heads/$branch" 2>/dev/null ||
+          fail "refusing to force-push $branch: it isn't a fast-forward of origin/$branch"
+      fi
+      ;;
+    -*) fail "not a branch name: '$branch'" ;;
+  esac
+  git show-ref --verify --quiet "refs/heads/$branch" || fail "no local branch '$branch'"
+done
+
+exec git push --force-with-lease origin "$@"
+''',
+    ),
+}
+
+
+def checklist(heading, items):
+    """Checkbox menu: items are (label, checked); returns the checked indexes,
+    or None when cancelled."""
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    checked = [bool(c) for _, c in items]
+    cursor = 0
+
+    def render(first):
+        if not first:
+            sys.stdout.write(f"\033[{len(items)}A")
+        for index, (label, _) in enumerate(items):
+            box = "[x]" if checked[index] else "[ ]"
+            line = f"{box} {label}"
+            text = styled(f"❯ {line}", "1", "36") if index == cursor else f"  {line if checked[index] else dim(line)}"
+            sys.stdout.write(f"\r\033[K  {text}\n")
+        sys.stdout.flush()
+
+    print(f"{styled(heading, '1', '32')} {dim('(↑/↓ to move, Space to toggle, Enter to confirm)')}")
+    sys.stdout.write("\033[?25l")
+    render(first=True)
+    try:
+        tty.setcbreak(fd)
+        while True:
+            key = os.read(fd, 3)
+            if key in (b"\x1b[A", b"k"):
+                cursor = (cursor - 1) % len(items)
+            elif key in (b"\x1b[B", b"j"):
+                cursor = (cursor + 1) % len(items)
+            elif key == b" ":
+                checked[cursor] = not checked[cursor]
+            elif key in (b"\r", b"\n"):
+                return [i for i, c in enumerate(checked) if c]
+            elif key in (b"q", b"\x1b"):
+                return None
+            else:
+                continue
+            render(first=False)
+    except KeyboardInterrupt:
+        return None
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        sys.stdout.write("\033[?25h")
+        sys.stdout.flush()
+
+
+# The instructions live in a file of their own, which init owns and can
+# update; the project's AGENTS.md only points at it. The pointer is a sentence
+# so any agent follows it, and its @path makes Claude Code import the file.
+AGENT_INSTRUCTIONS_FILE = ".humangate/AGENTS.md"
+AGENT_INSTRUCTIONS_POINTER = (
+    "Some actions need the person at the host - signing commits, pushing and the like; "
+    f"see @{AGENT_INSTRUCTIONS_FILE} for how to ask for them.\n"
+)
+AGENT_INSTRUCTIONS = """# Actions that need the person (humangate)
+
+Some things can't be done from this sandbox - signing commits or pushing, for example - because
+the keys stay on the host. Ask the person to run them with humangate:
+
+- `humangate tools` lists what can be requested and how to use each tool.
+- `humangate request --reason "<why>" <tool> [<arg>...]` asks for it and waits for the person's
+  decision (up to 9 minutes), then prints the tool's output and exits with its exit code.
+- Write the reason for the person reviewing it: what you did and why the tool is needed now.
+- Don't work around a rejection. If the person replies with a message instead (exit code 5),
+  act on it.
+- If nobody answers, `humangate ping` tells whether the person is running `humangate loop`.
+"""
+
+
+def instructions_file(worktree):
+    # AGENTS.md (read by most agents) unless the project only has a CLAUDE.md
+    # of its own - one that doesn't just import AGENTS.md.
+    claude = os.path.join(worktree, "CLAUDE.md")
+    if not os.path.exists(os.path.join(worktree, "AGENTS.md")) and os.path.exists(claude):
+        with open(claude) as f:
+            if "@AGENTS.md" not in f.read():
+                return "CLAUDE.md"
+    return "AGENTS.md"
+
+
+def read_text(path):
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return f.read()
+
+
+def instructions_status(worktree):
+    body = read_text(os.path.join(worktree, AGENT_INSTRUCTIONS_FILE))
+    doc = read_text(os.path.join(worktree, instructions_file(worktree))) or ""
+    if body is None or f"@{AGENT_INSTRUCTIONS_FILE}" not in doc:
+        return "new" if body in (None, AGENT_INSTRUCTIONS) else "differs"
+    return "same" if body == AGENT_INSTRUCTIONS else "differs"
+
+
+def write_instructions(worktree, force):
+    """Writes .humangate/AGENTS.md (keeping an edited one unless force) and
+    points the project's AGENTS.md at it. Returns what changed, for display."""
+    changes = []
+    body_path = os.path.join(worktree, AGENT_INSTRUCTIONS_FILE)
+    body = read_text(body_path)
+    if body != AGENT_INSTRUCTIONS and (body is None or force):
+        os.makedirs(os.path.dirname(body_path), exist_ok=True)
+        with open(body_path, "w") as f:
+            f.write(AGENT_INSTRUCTIONS)
+        changes.append(f"{'updated' if body else 'added'} {AGENT_INSTRUCTIONS_FILE}")
+    elif body != AGENT_INSTRUCTIONS:
+        changes.append(f"kept your {AGENT_INSTRUCTIONS_FILE} - it differs (--force to replace it)")
+
+    doc = instructions_file(worktree)
+    doc_path = os.path.join(worktree, doc)
+    text = read_text(doc_path) or ""
+    if f"@{AGENT_INSTRUCTIONS_FILE}" not in text:
+        with open(doc_path, "w") as f:
+            f.write((text.rstrip("\n") + "\n\n" if text.strip() else "") + AGENT_INSTRUCTIONS_POINTER)
+        changes.append(f"pointed {doc} at it")
+    return changes
+
+
+def cmd_init(argv):
+    flags = {"--force", "--global", "--instructions"}
+    force = "--force" in argv
+    is_global = "--global" in argv
+    names = [a for a in argv if a not in flags]
+    unknown = [n for n in names if n not in STARTER_TOOLS]
+    if unknown or any(n.startswith("-") for n in names):
+        usage(f"unknown tool {', '.join(unknown)} (available: {', '.join(STARTER_TOOLS)})")
+    if is_global and "--instructions" in argv:
+        usage("--instructions go into a project's AGENTS.md, not with --global")
+
+    if is_global:
+        if os.environ.get("WM_SANDBOX_GUEST"):
+            sys.exit("humangate init --global installs tools on the host - run it there, not in the sandbox.")
+        worktree = None
+        tools_dir = global_tools_dir()
+        shown_dir = "~/.humangate/tools"
+    else:
+        worktree = worktree_root()
+        tools_dir = os.path.join(worktree, ".humangate", "tools")
+        shown_dir = ".humangate/tools"
+    add_instructions = "--instructions" in argv
+
+    def status(name):
+        path = os.path.join(tools_dir, name)
+        if not os.path.exists(path):
+            return "new"
+        with open(path) as f:
+            return "same" if f.read() == STARTER_TOOLS[name][1] else "differs"
+
+    if not names and not add_instructions:
+        if not sys.stdin.isatty():
+            usage(
+                f"name what to add, e.g. `humangate init --instructions sign push` "
+                f"(tools: {', '.join(STARTER_TOOLS)})"
+            )
+        notes = {"new": "", "same": dim(" (already added)"), "differs": dim(" (yours differs - kept unless --force)")}
+        items = [(name, f"{name} - {summary}", status(name)) for name, (summary, _) in STARTER_TOOLS.items()]
+        if worktree:
+            items.append(
+                (
+                    "--instructions",
+                    f"instructions for the agent ({AGENT_INSTRUCTIONS_FILE}, referenced from {instructions_file(worktree)})",
+                    instructions_status(worktree),
+                )
+            )
+        picked = checklist(
+            "Add to this project" if worktree else f"Add tools to {shown_dir}/",
+            [(label + notes[state], state == "new") for _, label, state in items],
+        )
+        if picked is None:
+            print("Nothing added.")
+            return EXIT_CANCELLED
+        chosen = [items[i][0] for i in picked]
+        add_instructions = "--instructions" in chosen
+        names = [c for c in chosen if c != "--instructions"]
+        print()
+
+    changed = False
+    instructions_changed = []
+    if names:
+        os.makedirs(tools_dir, exist_ok=True)
+    for name in names:
+        path = os.path.join(tools_dir, name)
+        state = status(name)
+        if state == "same":
+            print(f"{name}: already there")
+            continue
+        if state == "differs" and not force:
+            print(f"{name}: kept yours - it differs (--force to replace it)")
+            continue
+        with open(path, "w") as f:
+            f.write(STARTER_TOOLS[name][1])
+        os.chmod(path, 0o755)
+        print(f"{name}: {'replaced' if state == 'differs' else 'added'} {shown_dir}/{name}")
+        changed = True
+
+    if add_instructions:
+        changes = write_instructions(worktree, force)
+        print(f"instructions: {'; '.join(changes) or 'already there'}")
+        if any(c.startswith(("added", "updated")) for c in changes):
+            instructions_changed.append(AGENT_INSTRUCTIONS_FILE)
+        if any(c.startswith("pointed") for c in changes):
+            instructions_changed.append(instructions_file(worktree))
+
+    if changed and is_global:
+        print(dim("\nGlobal tools are available in every project. A running `humangate loop` "
+                  "refuses requests until restarted."))
+    elif changed or instructions_changed:
+        paths = ([".humangate/tools/"] if changed else []) + instructions_changed
+        listed = ", ".join(paths[:-1]) + " and " + paths[-1] if len(paths) > 1 else paths[0]
+        restart = " A running `humangate loop` refuses requests until restarted." if changed else ""
+        print(dim(f"\nCommit {listed} so the changes travel with the project.{restart}"))
+    return 0
+
+
+COMMANDS = {
+    "loop": cmd_loop,
+    "init": cmd_init,
+    "request": cmd_request,
+    "tools": cmd_tools,
+    "ping": cmd_ping,
+    "wait": cmd_wait,
+    "version": lambda argv: print(f"humangate {VERSION}") or 0,
+}
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        sys.exit(0 if argv else EXIT_USAGE)
+    command = COMMANDS.get(argv[0])
+    if not command:
+        usage(f"unknown command {argv[0]!r}")
+    sys.exit(command(argv[1:]))
+
+
+if __name__ == "__main__":
+    main()
