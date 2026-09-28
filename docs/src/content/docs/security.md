@@ -30,6 +30,8 @@ to read what you approve.
   [guarding files](/guarding-files/).
 - Tools run with your full environment, so a tool's argument checks are what keeps it from
   doing more than its name says.
-- The loop refuses to start inside a workmux sandbox (`WM_SANDBOX_GUEST` set).
+- The loop refuses to start inside a workmux sandbox (`WM_SANDBOX_GUEST` set), and when
+  another loop runs in the same project. Its lock is kept on the host, so the agent can't
+  plant one to keep the loop from starting.
 - Any process that can write to the project directory can queue a request - including other
   agents sharing the same sandbox. The request still needs your approval.

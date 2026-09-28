@@ -55,7 +55,9 @@ and Enter, or the shortcut letter):
 
 Ctrl-C while a request is up cancels just that request (or interrupts its
 running tool); while idle it stops the loop. Decisions are logged on the
-host, one file per project directory, in ~/.humangate/logs/.
+host, one file per project directory, in ~/.humangate/logs/. One loop per
+project directory: a second refuses to start (the lock is in
+~/.humangate/locks/).
 
 The agent can write to the project directory, including the tools and what
 they run. So loop guards those files in the project: its tools, git hooks,
@@ -73,6 +75,7 @@ worktree root), which the sandbox and the host must both be able to write.
 import collections
 import datetime
 import difflib
+import fcntl
 import glob
 import hashlib
 import json
@@ -590,11 +593,38 @@ def write_atomically(path, payload):
     os.replace(tmp, path)
 
 
-def log_path(worktree):
-    # One log per project directory, kept on the host - a log inside the
-    # project would be writable by the agent it's recording.
+def host_path(kind, worktree, suffix):
+    # One file per project directory, kept on the host - inside the project,
+    # the agent could write to it.
     name = re.sub(r"[^A-Za-z0-9._-]+", "-", worktree.strip("/")) or "root"
-    return os.path.join(os.path.expanduser("~/.humangate/logs"), name + ".jsonl")
+    return os.path.join(os.path.expanduser(f"~/.humangate/{kind}"), name + suffix)
+
+
+def log_path(worktree):
+    return host_path("logs", worktree, ".jsonl")
+
+
+def lock_loop(worktree):
+    """Holds the project's loop lock for as long as this process lives; exits
+    if another loop holds it. A second loop would race the first for requests,
+    and on starting reject the one the first is showing as abandoned."""
+    path = host_path("locks", worktree, ".lock")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lock = open(path, "a+")
+    try:
+        # The kernel drops it when the process dies, however it dies - no
+        # stale lock to clean up.
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.seek(0)
+        pid = lock.read().strip()
+        running = f" (pid {pid})" if pid.isdigit() else ""
+        sys.exit(f"humangate loop is already running in this project{running}.")
+    # The pid is only for that message.
+    lock.truncate(0)
+    lock.write(f"{os.getpid()}\n")
+    lock.flush()
+    return lock
 
 
 def log(worktree, entry):
@@ -723,6 +753,11 @@ def run(worktree, argv):
     return (128 - exit_code if exit_code < 0 else exit_code), "".join(output)[-MAX_OUTPUT_CHARS:]
 
 
+def shown_command(tool, args, worktree):
+    # The path isn't quoted, so ~ stays readable; tool paths never need it.
+    return clean_text(" ".join([display_path(tool, worktree), *map(shlex.quote, args)]), required=False)
+
+
 class Approver:
     def __init__(self, worktree):
         self.worktree = worktree
@@ -744,17 +779,20 @@ class Approver:
             print(dim("\nGuarded files are back to their approved state."))
             self.reviewed = set()
         elif changed and not set(changed) <= self.reviewed:
-            self.review(current, changed, waiting=False)
+            self.review(current, changed)
 
-    def review(self, current, changed, waiting):
+    def review(self, current, changed, waiting=None):
         """Shows what changed in the guarded files and asks whether to accept
-        it; returns True if accepted."""
+        it; returns True if accepted. waiting: the (id, command) of a request
+        held up by the change."""
         sys.stdout.write("\a")  # a change can come any time; get the person's attention
         print(f"\n\n{styled('── Guarded files changed ──', '1', '31')}\n")
-        print(
-            "A request is waiting; it's refused unless you accept this.\n"
-            if waiting else "Requests are refused until you accept this or it's reverted.\n"
-        )
+        if waiting:
+            request_id, shown = waiting
+            print(f"Request {request_id} is waiting; it's refused unless you accept this:")
+            print(command_style(shown) + "\n")
+        else:
+            print("Requests are refused until you accept this or it's reverted.\n")
         state, roots, newly = self.guard.proposal(current)
         for key in self.guard.changed(state):
             show_change(self.guard.name(key), self.guard.approved.get(key), state.get(key), key in newly)
@@ -809,14 +847,15 @@ class Approver:
                 return
             if request.get("kind") != "run":
                 raise Invalid(f"unknown request kind {request.get('kind')!r}")
-            resolve_tool(self.worktree, request.get("tool"))
+            tool = resolve_tool(self.worktree, request.get("tool"))
             args = request.get("args")
             if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
                 raise Invalid("args must be a list of strings")
             reason = clean_text(request.get("reason"), required=True)
             current = self.guard.fingerprint()
             changed = self.guard.changed(current)
-            if changed and not self.review(current, changed, waiting=True):
+            waiting = (request_id, shown_command(tool, args, self.worktree))
+            if changed and not self.review(current, changed, waiting):
                 raise Invalid(
                     "guarded files changed and the person hasn't accepted the change: "
                     + ", ".join(self.guard.name(key) for key in changed)
@@ -834,9 +873,7 @@ class Approver:
         print(f"\n\n{title(f'── Request {request_id} ──')}\n")
         print(reason)
         print()
-        # The path isn't quoted, so ~ stays readable; tool paths never need it.
-        shown = " ".join([display_path(tool, self.worktree), *map(shlex.quote, args)])
-        print(command_style(clean_text(shown, required=False)))
+        print(command_style(shown_command(tool, args, self.worktree)))
 
         auto = key in self.always
         if auto:
@@ -971,6 +1008,8 @@ def cmd_loop(argv):
         sys.exit("humangate loop runs on the host, not inside the sandbox.")
 
     worktree = worktree_root()
+    # Held until the process exits.
+    lock = lock_loop(worktree)
     approver = Approver(worktree)
     approver.release_abandoned()
     # Ctrl-C raises KeyboardInterrupt even if whatever started us ignored it.

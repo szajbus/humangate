@@ -13,8 +13,9 @@ state when it starts, and checks them every couple of seconds and before each re
 Always guarded: the project's tools, git hooks (including `core.hooksPath`), the repository's git config
 except `branch.*` (git writes those itself) and `workmux.worktree.*` (the state
 [workmux](https://github.com/raine/workmux) keeps for each worktree it creates), and
-`.humangate/guard` - the project's list of more paths to guard. It takes one path or glob per line (`**` matches any depth), relative to
-the project root. A directory covers everything in it; `#` starts a comment:
+`.humangate/guard` - the project's list of more paths to guard. It takes one path or glob per
+line (`**` matches any depth), relative to the project root. A directory covers everything in
+it; `#` starts a comment:
 
 ```
 # Files humangate loop guards on top of the built-in ones ...
@@ -29,8 +30,9 @@ entry.
 
 A change shows up at once as a diff (size and hash for binary files). Accept it and it becomes
 the approved state; refuse it and requests are refused until it's reverted - each new request
-offers the review again. Files that a change to the list starts guarding are part of the same
-review, and a request isn't run if a guarded file changes while you're deciding on it.
+offers the review again, naming the request and its command. Files that a change to the list
+starts guarding are part of the same review, and a request isn't run if a guarded file changes
+while you're deciding on it.
 
 Keep in mind:
 

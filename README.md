@@ -72,7 +72,8 @@ host once you approve it. Credentials the agent never gets can't leak.
    on the host, for every project), and offers to tell the agent about humangate in
    `AGENTS.md` and to suggest files to guard.
 2. On the host, in the project directory, run `humangate loop` and keep it open. Every project
-   directory - every git worktree, too - has its own queue, so run one loop per agent session.
+   directory - every git worktree, too - has its own queue, so run one loop per agent session;
+   a second loop in the same directory refuses to start.
 
 ## Tools
 
@@ -142,4 +143,5 @@ try to trick you, and relies on you to read what you approve.
   says.
 - Any process that can write to the project directory can queue a request, other agents
   included. It still needs your approval.
-- The loop refuses to start inside a workmux sandbox (`WM_SANDBOX_GUEST` set).
+- The loop refuses to start inside a workmux sandbox (`WM_SANDBOX_GUEST` set), and when
+  another loop runs in the same project (the lock is kept on the host).

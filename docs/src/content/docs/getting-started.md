@@ -38,4 +38,6 @@ or token to hand out; the price is polling - an answer takes up to a second.
    offers a starter list based on what it finds in the project.
 
 Every project directory - every git worktree, too - has its own queue, so run one loop per
-agent session.
+agent session. A second loop in the same directory refuses to start, naming the process that
+has it: two would race for requests. The lock is kept on the host, in `~/.humangate/locks/`,
+out of the agent's reach, and it goes away with the process, however it ends.
