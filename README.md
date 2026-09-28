@@ -1,18 +1,11 @@
 # humangate
 
-Coding agents are safest in a sandbox without your keys - but then they can't sign a commit,
-push or deploy. humangate gives the agent those capabilities back without giving it the keys:
-it asks you to run a tool on the host, and nothing runs until you say yes. Meanwhile humangate
-watches the files the agent could use to subvert your approval, and shows you any change.
+Coding agents should run in sandboxes, away from your keys and anything that can do damage.
+humangate keeps it that way: the agent can only ask for one of the tools you've set up, and you
+run it on your host. Your keys and credentials never enter the sandbox - the agent just gets the
+output back.
 
-In the sandbox, the agent asks:
-
-```
-$ humangate request --reason "Rebased onto main; signatures were lost" git-sign my-branch
-humangate: request 4f93b1686d8a3142 sent; waiting for approval on the host...
-```
-
-On the host, you decide:
+When the agent asks, you decide:
 
 ```
 $ humangate loop
