@@ -11,8 +11,9 @@ the agent's code with your credentials. So the loop guards these files: it remem
 state when it starts, and checks them every couple of seconds and before each request.
 
 Always guarded: the project's tools, git hooks (including `core.hooksPath`), the repository's git config
-except `branch.*` (git writes those itself), and `.humangate/guard` - the project's list of
-more paths to guard. It takes one path or glob per line (`**` matches any depth), relative to
+except `branch.*` (git writes those itself) and `workmux.worktree.*` (the state
+[workmux](https://github.com/raine/workmux) keeps for each worktree it creates), and
+`.humangate/guard` - the project's list of more paths to guard. It takes one path or glob per line (`**` matches any depth), relative to
 the project root. A directory covers everything in it; `#` starts a comment:
 
 ```

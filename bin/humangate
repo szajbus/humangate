@@ -267,14 +267,15 @@ def guarded_roots(worktree, guard_text):
 
 def repo_git_config(worktree):
     # Repo and worktree git config, minus branch.* - git itself writes those
-    # (e.g. push.autoSetupRemote), and they can't run programs.
+    # (e.g. push.autoSetupRemote) - and workmux.worktree.*, the state workmux
+    # keeps for each worktree it creates. Neither can run programs.
     listing = subprocess.run(
         ["git", "config", "--list", "--show-scope"], cwd=worktree, capture_output=True, text=True
     ).stdout.splitlines()
     return sorted(
         line for line in listing
         if line.split("\t", 1)[0] in ("local", "worktree")
-        and not line.split("\t", 1)[-1].startswith("branch.")
+        and not line.split("\t", 1)[-1].startswith(("branch.", "workmux.worktree."))
     )
 
 

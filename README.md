@@ -100,8 +100,9 @@ scripts, a `Makefile`. A tool that runs them becomes a *confused deputy*, acting
 code with your credentials. So the loop guards these files, checking them every couple of
 seconds and before each request.
 
-Always guarded: the tools, git hooks, git config (except `branch.*`) and `.humangate/guard`,
-which lists more paths or globs, one per line, relative to the project root:
+Always guarded: the tools, git hooks, git config (except `branch.*` and `workmux.worktree.*`)
+and `.humangate/guard`, which lists more paths or globs, one per line, relative to the project
+root:
 
 ```
 package.json
