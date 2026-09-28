@@ -80,6 +80,7 @@ import glob
 import hashlib
 import json
 import os
+import random
 import re
 import secrets
 import shlex
@@ -642,6 +643,32 @@ def ask(prompt):
         return ""
 
 
+# How a request introduces itself in the loop; {command} is the command it asks for.
+GREETINGS = [
+    "hey human, can you please run {command} for me?",
+    "hello my dear meatball, I need {command}",
+    "help needed, {command}, thx bye",
+    "psst, you there? {command}, if you'd be so kind",
+    "your friendly neighbourhood agent requests {command}",
+    "I'd do it myself, but you took my keys: {command}",
+    "one tiny favour, carbon-based friend: {command}",
+    "by the power vested in you, please run {command}",
+    "dear human, in accordance with my programming I humbly beg for {command}",
+    "you have the fingers, I have the plan: {command}",
+    "beep boop, {command} pls",
+    "not to be dramatic, but my whole future depends on {command}",
+    "roses are red, keys are on the host, please run {command}",
+    "I asked the sandbox nicely, it said ask you: {command}",
+    "sorry to interrupt your coffee, {command} needed",
+    "quick one, promise: {command}",
+    "would you kindly... {command}",
+    "incoming! {command}, whenever you're ready",
+    "my circuits are tingling for {command}",
+    "you're my only hope, human. {command}",
+    "trust me, I'm an agent: {command}",
+]
+
+
 CHOICES = [
     ("no", "n", "No"),
     ("yes", "y", "Yes, run it"),
@@ -870,10 +897,9 @@ class Approver:
         argv = [tool, *args]
         key = tuple(argv)
         entry = {"tool": request["tool"], "args": args, "reason": reason}
-        print(f"\n\n{title(f'── Request {request_id} ──')}\n")
+        greeting = random.choice(GREETINGS).format(command=command_style(shown_command(tool, args, self.worktree)))
+        print(f"\n\n{dim(f'[{request_id}]')} {greeting}\n")
         print(reason)
-        print()
-        print(command_style(shown_command(tool, args, self.worktree)))
 
         auto = key in self.always
         if auto:

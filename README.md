@@ -21,11 +21,9 @@ Tools: git-push, git-push-with-force, git-sign
 Guarding: git config, .humangate/tools, .humangate/guard, .git/hooks, package.json (18 files)
 Log: /home/me/.humangate/logs/home-me-project.jsonl
 
-── Request 4f93b1686d8a3142 ──
+[4f93b1686d8a3142] hey human, can you please run .humangate/tools/git-sign my-branch for me?
 
 Rebased onto main; signatures were lost
-
-.humangate/tools/git-sign my-branch
 
 Run it? (↑/↓ and Enter, or a shortcut letter)
     n  No
