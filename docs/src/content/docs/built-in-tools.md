@@ -23,9 +23,14 @@ starting point for your own.
 git-sign <branch>
 ```
 
-Re-signs every commit `<branch>` has on top of the base branch, in place - for when a rebase in
+Re-signs the commits `<branch>` has on top of the base branch, in place - for when a rebase in
 the sandbox dropped the signatures. The base branch is `main`, or `$HUMANGATE_BASE_BRANCH` in the
 loop's environment. Stacked branches pointing into the re-signed range move along with it.
+
+Commits at the bottom of the range that already have a good signature are left alone. From the
+first unsigned commit up, everything is re-signed, signed or not: rewriting a commit changes the
+hash of every commit above it, which invalidates their signatures. If every commit is signed
+already, nothing happens.
 
 On the base branch itself, it re-signs only the commits not on `origin` yet (all of them in a new
 repository), never published history.
