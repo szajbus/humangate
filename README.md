@@ -9,7 +9,7 @@ When the agent asks, you decide:
 
 ```
 $ humangate loop
-humangate loop watching /home/me/project/.humangate/queue (Ctrl-C to stop)
+humangate 0.2.0 loop watching /home/me/project/.humangate/queue (Ctrl-C to stop)
 Tools: gh-pr-create (built-in), git-push (built-in), git-push-with-force (built-in), git-sign (built-in)
 Guarding: git config, .humangate/tools, .humangate/guard, .git/hooks, package.json (18 files)
 Log: /home/me/.humangate/logs/home-me-project.jsonl

@@ -1064,7 +1064,7 @@ def cmd_loop(argv):
     # Ctrl-C raises KeyboardInterrupt even if whatever started us ignored it.
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
-    print(f"{title('humangate loop')} watching {approver.queue} {dim('(Ctrl-C to stop)')}")
+    print(f"{title(f'humangate {VERSION} loop')} watching {approver.queue} {dim('(Ctrl-C to stop)')}")
     found = [(scope, tools_in(directory)) for scope, directory in tool_dirs(worktree)]
     tools = [f"{n} ({tool_label(n, scope, found)})" for n, (scope, _) in available_tools(worktree).items()]
     print(dim(f"Tools: {', '.join(tools) or 'none'}"))
