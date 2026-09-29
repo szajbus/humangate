@@ -59,7 +59,7 @@ host once you approve it. Credentials the agent never gets can't leak.
 ## Use
 
 1. Run `humangate init`. It adds starter tools - `git-sign`, `git-push`,
-   `git-push-with-force` - to `.humangate/tools/` (or with `--global`, to `~/.humangate/tools/`
+   `git-push-with-force`, `gh-pr-create` - to `.humangate/tools/` (or with `--global`, to `~/.humangate/tools/`
    on the host, for every project), and offers to tell the agent about humangate in
    `AGENTS.md` and to suggest files to guard.
 2. On the host, in the project directory, run `humangate loop` and keep it open. Every project
@@ -129,7 +129,8 @@ try to trick you, and relies on you to read what you approve.
 
 - A write-enabled credential in the sandbox bypasses humangate entirely.
 - A request is only a tool name, arguments and a reason. What you're shown is exactly what
-  runs, with no shell involved and control characters stripped.
+  runs, with no shell involved; arguments with control or invisible characters, or too long to
+  show whole, are refused.
 - Tools run with your full environment; their argument checks keep them to what their name
   says.
 - Any process that can write to the project directory can queue a request, other agents

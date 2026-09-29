@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Usage: gh-pr-create [--base <branch>] <branch> <title> [<body>]
+#
+# Opens a GitHub pull request, with the gh CLI, from <branch> into the base
+# branch (main, $HUMANGATE_BASE_BRANCH, or --base for a stacked branch).
+# <branch> must already be pushed to origin as it is locally, so the pull
+# request holds exactly the commits you see here.
+set -euo pipefail
+
+if [ "${1:-}" = --help ]; then
+  awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
+  exit 0
+fi
+
+fail() { echo "gh-pr-create: $*" >&2; exit 2; }
+usage="usage: gh-pr-create [--base <branch>] <branch> <title> [<body>]"
+
+base=${HUMANGATE_BASE_BRANCH:-main}
+if [ "${1:-}" = --base ]; then
+  [ $# -ge 2 ] || fail "$usage"
+  base=$2
+  shift 2
+fi
+[ $# -eq 2 ] || [ $# -eq 3 ] || fail "$usage"
+branch=$1
+title=$2
+body=${3:-}
+
+for name in "$branch" "$base"; do
+  case "$name" in -*) fail "not a branch name: '$name'" ;; esac
+done
+[ "$branch" != "$base" ] || fail "'$branch' is the base branch"
+case "$title" in
+  "" | *[![:print:]]*) fail "the title must be one line of text" ;;
+esac
+command -v gh >/dev/null || fail "the gh CLI isn't installed"
+
+git show-ref --verify --quiet "refs/heads/$branch" || fail "no local branch '$branch'"
+git show-ref --verify --quiet "refs/remotes/origin/$base" || fail "no branch '$base' on origin"
+[ "$(git rev-parse --quiet --verify "refs/remotes/origin/$branch" || true)" = "$(git rev-parse "refs/heads/$branch")" ] ||
+  fail "'$branch' isn't pushed to origin as it is locally - push it first"
+
+echo "Pull request $branch -> $base:"
+git log --reverse --format='  %h %s' "refs/remotes/origin/$base..refs/heads/$branch"
+echo
+exec gh pr create --base="$base" --head="$branch" --title="$title" --body="$body"

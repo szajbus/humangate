@@ -14,14 +14,14 @@ shows them any change. See `README.md` for what it does and how it's used.
   `.github/workflows/docs.yml`. Its pages follow the README's sections but carry the full
   detail, while the README stays short - a change to how humangate behaves goes in both - plus
   a page on the starter tools, to update when `STARTER_TOOLS` changes.
-- Starter tools (`git-sign`, `git-push`, `git-push-with-force`) live inside `bin/humangate`, in `STARTER_TOOLS`, so the
+- Starter tools (`git-sign`, `git-push`, `git-push-with-force`, `gh-pr-create`) live inside `bin/humangate`, in `STARTER_TOOLS`, so the
   installed script is self-contained; `humangate init` writes them into a project, or with
   `--global` into `~/.humangate/tools/` on the host.
 - The loop also guards files: the tools, git hooks and config, and whatever a project lists in
   `.humangate/guard` (`humangate init --guard` suggests entries from `GUARD_CANDIDATES`). It
   shows changes as diffs to accept or refuse.
 - `.humangate/tools/` - the tools this repository itself uses, installed from the starter tools
-  (`bin/humangate init --force git-sign git-push git-push-with-force` after changing them); development of humangate goes
+  (`bin/humangate init --force git-sign git-push git-push-with-force gh-pr-create` after changing them); development of humangate goes
   through humangate, so sign and push by requesting them (`humangate request ...`).
 
 ## Conventions

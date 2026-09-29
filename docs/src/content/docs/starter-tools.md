@@ -1,6 +1,6 @@
 ---
 title: Starter tools
-description: The ready-made tools humangate init adds - git-sign, git-push and git-push-with-force.
+description: The ready-made tools humangate init adds - git-sign, git-push, git-push-with-force and gh-pr-create.
 ---
 
 `humangate init` adds these to a project's `.humangate/tools/`, picked from a checklist or named
@@ -51,3 +51,17 @@ last fetch, and it never force-pushes `main` or `master`.
 
 Both push tools accept only names of existing local branches, so the command you approve says
 exactly which branches go where.
+
+## gh-pr-create
+
+```
+gh-pr-create [--base <branch>] <branch> <title> [<body>]
+```
+
+Opens a GitHub pull request from `<branch>` with the [gh CLI](https://cli.github.com/), which
+must be installed and signed in on the host. It goes into the base branch - `main`, or
+`$HUMANGATE_BASE_BRANCH` in the loop's environment - or into `--base` for a branch stacked on
+another. The title must be a single line; the body is optional.
+
+It refuses unless `<branch>` is already pushed to `origin` exactly as it is locally, so the pull
+request holds the commits it lists before creating it - the ones you can see in the project.
