@@ -20,8 +20,8 @@ shows them any change. See `README.md` for what it does and how it's used.
   detail, while the README stays short - a change to how humangate behaves goes in both - plus
   a page on the built-in tools, to update when `tools/` changes.
 - `tools/` - the built-in tools (`git-sign`, `git-push`, `git-push-with-force`,
-  `gh-pr-create`) and their `index`, one name per line, which the installer downloads into
-  `~/.humangate/built-in-tools/`. A new tool goes in both.
+  `gh-pr-create`), which the installer downloads into `~/.humangate/built-in-tools/`. A new
+  tool goes in the `tools` list in `install.sh` too.
 - `humangate init` only sets a project up: instructions for the agent and the guard list.
 - The loop also guards files: the tools, git hooks and config, and whatever a project lists in
   `.humangate/guard` (`humangate init --guard` suggests entries from `GUARD_CANDIDATES`). It

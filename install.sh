@@ -17,6 +17,8 @@ bin_dir="${HUMANGATE_BIN_DIR:-$HOME/.local/bin}"
 base_url="https://raw.githubusercontent.com/$repo/$ref"
 url="$base_url/bin/humangate"
 tools_dir="$HOME/.humangate/built-in-tools"
+# The built-in tools, from tools/ in the repository - a new one goes here too.
+tools="git-sign git-push git-push-with-force gh-pr-create"
 
 fail() {
   echo "humangate install: $*" >&2
@@ -48,32 +50,22 @@ chmod 755 "$tmp"
 mv "$tmp" "$bin_dir/humangate"
 echo "Installed $("$bin_dir/humangate" version) to $bin_dir/humangate"
 
-download "$base_url/tools/index" "$tmp_tool"
-names=$(grep -v '^#' "$tmp_tool" || true)
-[ -n "$names" ] || fail "no built-in tools listed in $base_url/tools/index"
-installed=""
-set -f # the names are split on whitespace, never expanded as globs
-for name in $names; do
-  case "$name" in
-    [!A-Za-z0-9]* | *[!A-Za-z0-9._-]*) fail "not a tool name in the index: '$name'" ;;
-  esac
+for name in $tools; do
   download "$base_url/tools/$name" "$tmp_tool"
   head -n 1 "$tmp_tool" | grep -q '^#!' || fail "$base_url/tools/$name doesn't look like a script"
   chmod 755 "$tmp_tool"
   mv "$tmp_tool" "$tools_dir/$name"
   tmp_tool=$(mktemp "$tools_dir/.tool.XXXXXX")
-  installed="$installed $name"
 done
-set +f
 # Tools no longer listed are gone from the repository too.
 for path in "$tools_dir"/*; do
   [ -f "$path" ] || continue
-  case "$installed " in
+  case " $tools " in
     *" ${path##*/} "*) ;;
     *) rm -f "$path" ;;
   esac
 done
-echo "Built-in tools in $tools_dir:$installed"
+echo "Built-in tools in $tools_dir: $tools"
 [ ! -d "$HOME/.humangate/tools" ] ||
   echo "Note: ~/.humangate/tools/ isn't read any more - move tools you wrote yourself to ~/.humangate/user-tools/, and delete copies of the built-in ones."
 
