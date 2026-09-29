@@ -1,6 +1,6 @@
 ---
 title: Built-in tools
-description: The ready-made tools the installer adds - git-sign, git-push, git-push-with-force and gh-pr-create.
+description: The ready-made tools the installer adds - git-sign, git-push, git-push-with-force, gh-issue-create and gh-pr-create.
 ---
 
 The installer puts these in `~/.humangate/built-in-tools/` on the host, so they're
@@ -63,6 +63,16 @@ last fetch, and it never force-pushes `main` or `master`.
 
 Both push tools accept only names of existing local branches, so the command you approve says
 exactly which branches go where.
+
+## gh-issue-create
+
+```
+gh-issue-create <title> [<body>]
+```
+
+Opens an issue in the project's repository with the [gh CLI](https://cli.github.com/), which
+must be installed and signed in on the host. The title must be a single line; the body is
+optional. The prompt shows the title and body you're approving.
 
 ## gh-pr-create
 

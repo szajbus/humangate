@@ -25,7 +25,7 @@ or token to hand out; the price is polling - an answer takes up to a second.
 ## Set up a project
 
 1. Give the project the tools it needs. The [built-in tools](/built-in-tools/) -
-   `git-sign`, `git-push`, `git-push-with-force` and `gh-pr-create` - are there already; write
+   `git-sign`, `git-push`, `git-push-with-force`, `gh-issue-create` and `gh-pr-create` - are there already; write
    your own for anything else, as executables in `.humangate/tools/` (see [Tools](/tools/)).
 2. On the host, in the project directory, start the loop and keep it open:
    ```bash

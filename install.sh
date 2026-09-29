@@ -18,7 +18,7 @@ base_url="https://raw.githubusercontent.com/$repo/$ref"
 url="$base_url/bin/humangate"
 tools_dir="$HOME/.humangate/built-in-tools"
 # The built-in tools, from tools/ in the repository - a new one goes here too.
-tools="git-sign git-push git-push-with-force gh-pr-create"
+tools="git-sign git-push git-push-with-force gh-issue-create gh-pr-create"
 
 fail() {
   echo "humangate install: $*" >&2

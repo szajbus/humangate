@@ -10,7 +10,7 @@ When the agent asks, you decide:
 ```
 $ humangate loop
 humangate 0.2.0 loop watching /home/me/project/.humangate/queue (Ctrl-C to stop)
-Tools: gh-pr-create (built-in), git-push (built-in), git-push-with-force (built-in), git-sign (built-in)
+Tools: gh-issue-create (built-in), gh-pr-create (built-in), git-push (built-in), git-push-with-force (built-in), git-sign (built-in)
 Guarding: git config, .humangate/tools, .humangate/guard, .git/hooks, package.json (18 files)
 Log: /home/me/.humangate/logs/home-me-project.jsonl
 
@@ -60,7 +60,7 @@ host once you approve it. Credentials the agent never gets can't leak.
 
 1. Run `humangate init` in the project. It offers to tell the agent about humangate in
    `AGENTS.md` and to suggest files to guard. Tools need no setting up: humangate comes
-   with `git-sign`, `git-push`, `git-push-with-force` and `gh-pr-create` built in, for every
+   with `git-sign`, `git-push`, `git-push-with-force`, `gh-issue-create` and `gh-pr-create` built in, for every
    project; add your own to the project's `.humangate/tools/`.
 2. On the host, in the project directory, run `humangate loop` and keep it open. Every project
    directory - every git worktree, too - has its own queue, so run one loop per agent session;

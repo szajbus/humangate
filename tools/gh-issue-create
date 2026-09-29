@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Usage: gh-issue-create <title> [<body>]
+#
+# Opens a GitHub issue in the project's repository, with the gh CLI.
+set -euo pipefail
+
+if [ "${1:-}" = --help ]; then
+  awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
+  exit 0
+fi
+
+fail() { echo "gh-issue-create: $*" >&2; exit 2; }
+usage="usage: gh-issue-create <title> [<body>]"
+
+[ $# -eq 1 ] || [ $# -eq 2 ] || fail "$usage"
+title=$1
+body=${2:-}
+
+case "$title" in
+  "" | *[![:print:]]*) fail "the title must be one line of text" ;;
+esac
+command -v gh >/dev/null || fail "the gh CLI isn't installed"
+
+echo "Issue: $title"
+[ -z "$body" ] || { echo; echo "$body"; echo; }
+exec gh issue create --title="$title" --body="$body"
