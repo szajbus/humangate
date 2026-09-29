@@ -14,7 +14,7 @@ Tools: gh-pr-create (built-in), git-push (built-in), git-push-with-force (built-
 Guarding: git config, .humangate/tools, .humangate/guard, .git/hooks, package.json (18 files)
 Log: /home/me/.humangate/logs/home-me-project.jsonl
 
-[4f93b1686d8a3142] hey human, can you please run (built-in) git-sign my-branch for me?
+[4f93b1686d8a3142] hey human, can you please run built-in:git-sign my-branch for me?
 
 Rebased onto main; signatures were lost
 

@@ -793,8 +793,8 @@ def run(worktree, argv):
 
 
 def shown_command(name, scope, args):
-    """The command as the person sees it, styled: where the tool comes from,
-    then the command itself - `(built-in) git-sign my-branch`."""
+    """The command as the person sees it, styled, its tool named with where
+    it comes from - `built-in:git-sign my-branch`."""
     # What the person approves must be exactly what runs, so arguments the
     # terminal couldn't show as they are, or too long to show whole, refuse the
     # request rather than being cleaned up or cut short for display.
@@ -804,7 +804,9 @@ def shown_command(name, scope, args):
     quoted = " ".join(map(shlex.quote, args))
     if len(name) + len(quoted) > MAX_COMMAND_CHARS:
         raise Invalid(f"the command is {len(name) + len(quoted)} characters; at most {MAX_COMMAND_CHARS} can be shown for approval")
-    return dim(f"({scope})") + " " + command_style(" ".join([name, quoted]) if args else name)
+    # The label dim, like the loop's other metadata, the command itself bold
+    # yellow: the eye goes to what runs.
+    return dim(f"{scope}:") + command_style(name + (f" {quoted}" if args else ""))
 
 
 class Approver:
