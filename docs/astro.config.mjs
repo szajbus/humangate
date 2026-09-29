@@ -38,7 +38,7 @@ export default defineConfig({
 				{ label: 'Getting started', slug: 'getting-started' },
 				{ label: 'Which credentials go where', slug: 'credentials' },
 				{ label: 'Tools', slug: 'tools' },
-				{ label: 'Starter tools', slug: 'starter-tools' },
+				{ label: 'Built-in tools', slug: 'built-in-tools' },
 				{ label: 'Guarding files', slug: 'guarding-files' },
 				{ label: 'Security', slug: 'security' },
 			],

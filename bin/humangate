@@ -12,24 +12,26 @@ person any change.
 
 Usage:
   humangate loop                                        (the person, on the host)
-  humangate init [--global] [--force] [--instructions] [--guard] [<tool>...]
-                                                        (set a project up)
+  humangate init [--force] [--instructions] [--guard]   (set a project up)
   humangate request --reason "<why>" <tool> [<arg>...]  (the agent)
   humangate tools [<tool>]                              (what can be requested)
   humangate ping                                        (is the loop running?)
   humangate wait <request-id>                           (after a timeout)
   humangate version
 
-init adds ready-made tools (git-sign, git-push, git-push-with-force,
-gh-pr-create) to .humangate/tools/ - or with --global to ~/.humangate/tools/
-on the host, for every project - picked from a checklist or named as arguments; it never
-overwrites a changed tool without --force. In a project it can also add instructions for the agent
-(--instructions): in .humangate/AGENTS.md, with a one-line reference from the
-project's AGENTS.md; and a list of files to guard (--guard), suggested from
-what it finds in the project, in .humangate/guard.
+init sets up a project, picked from a checklist or named as options:
+instructions for the agent (--instructions) in .humangate/AGENTS.md, with a
+one-line reference from the project's AGENTS.md; and a list of files to guard
+(--guard), suggested from what it finds in the project, in .humangate/guard.
+It never overwrites changed instructions without --force. Tools need no
+setting up: some come built in (git-sign, git-push, ...).
 
-Tools come from the project's .humangate/tools/ and the host's
-~/.humangate/tools/; a project tool overrides a global one of the same name.
+Tools come from three places, each tool labelled with where it's from; the
+first with a tool of that name wins:
+  project   .humangate/tools/ in the project
+  user      ~/.humangate/user-tools/ on the host, the person's own
+  built-in  ~/.humangate/built-in-tools/ on the host, kept current by the
+            installer
 The sandbox can't see the host's home, so `tools` asks the loop for the
 list (answered at once, like ping) and, without a loop, shows only what's
 visible locally.
@@ -92,7 +94,7 @@ import termios
 import time
 import tty
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 EXIT_USAGE = 2
 EXIT_REJECTED = 3
@@ -241,7 +243,7 @@ def guarded_roots(worktree, guard_text):
     one takes a review like any other change.
 
     Only what's in the project (its worktree and git directory): anything
-    outside - global tools, a core.hooksPath in the home directory - is shared
+    outside - user and built-in tools, a core.hooksPath in the home directory - is shared
     by every loop on the host, and each would ask about the same change."""
     common = os.path.normpath(git_path(worktree, "rev-parse", "--git-common-dir"))
     paths = [os.path.join(worktree, ".humangate", "tools"), os.path.join(worktree, GUARD_FILE), os.path.join(common, "hooks")]
@@ -431,13 +433,16 @@ def show_change(name, old, new, newly_guarded=False):
         print(f"  contents: {before}{new.size} bytes, sha256 {new.sha[:12]} {dim('(binary or large - no diff)')}")
 
 
-def global_tools_dir():
-    return os.path.expanduser("~/.humangate/tools")
-
-
 def tool_dirs(worktree):
-    # Project first: a project tool overrides a global one of the same name.
-    return [("project", os.path.join(worktree, ".humangate", "tools")), ("global", global_tools_dir())]
+    # (label, directory); first wins: a project tool overrides the person's
+    # own, which overrides a built-in one - those the installer keeps
+    # current, replacing them on every run.
+    home = os.path.expanduser("~/.humangate")
+    return [
+        ("project", os.path.join(worktree, ".humangate", "tools")),
+        ("user", os.path.join(home, "user-tools")),
+        ("built-in", os.path.join(home, "built-in-tools")),
+    ]
 
 
 def tools_in(directory):
@@ -452,12 +457,19 @@ def tools_in(directory):
 
 
 def available_tools(worktree):
-    """name -> (scope, path), project tools overriding global ones."""
+    """name -> (scope, path), earlier directories overriding later ones."""
     tools = {}
     for scope, directory in reversed(tool_dirs(worktree)):
         for name, path in tools_in(directory).items():
             tools[name] = (scope, path)
     return dict(sorted(tools.items()))
+
+
+def tool_label(name, scope, found):
+    """Where a tool comes from, and which one of the same name it overrides:
+    `user, overrides built-in`. found: [(scope, tools_in(...))]."""
+    overridden = [s for s, names in found if name in names and s != scope][:1]
+    return ", ".join([scope] + [f"overrides {s}" for s in overridden])
 
 
 def display_path(path, worktree):
@@ -470,9 +482,10 @@ def display_path(path, worktree):
 
 
 def resolve_tool(worktree, name):
+    """(label, path) of the tool the agent asks for by name."""
     if not isinstance(name, str) or not TOOL_NAME.match(name):
         raise Invalid(f"not a valid tool name: {name!r}")
-    for _, directory in tool_dirs(worktree):
+    for scope, directory in tool_dirs(worktree):
         real = os.path.realpath(directory)
         path = os.path.join(real, name)
         if not os.path.lexists(path):
@@ -480,7 +493,7 @@ def resolve_tool(worktree, name):
         if os.path.islink(path) or os.path.dirname(os.path.realpath(path)) != real:
             raise Invalid(f"tool {name!r} must be a file in its tools directory, not a link")
         if os.path.isfile(path) and os.access(path, os.X_OK):
-            return path
+            return scope, path
     available = ", ".join(available_tools(worktree)) or "none"
     raise Invalid(f"no tool {name!r} (available: {available})")
 
@@ -505,21 +518,19 @@ def tool_help(path):
 
 
 def describe_tools(worktree, name=None):
-    """What `humangate tools` prints: each tool's help header, marked when it
-    comes from ~/.humangate/tools. Returns (exit code, text)."""
+    """What `humangate tools` prints: each tool's help header, labelled with
+    where it comes from and what it overrides. Returns (exit code, text)."""
     tools = available_tools(worktree)
-    shadowed = set(tools_in(global_tools_dir())) & set(tools_in(tool_dirs(worktree)[0][1]))
+    found = [(scope, tools_in(directory)) for scope, directory in tool_dirs(worktree)]
     if name is not None:
         if name not in tools:
             return EXIT_USAGE, f"no tool {name!r} (available: {', '.join(tools) or 'none'})\n"
         tools = {name: tools[name]}
     if not tools:
-        return 0, "No tools in .humangate/tools/ or ~/.humangate/tools/.\n"
+        return 0, "No tools in .humangate/tools/, ~/.humangate/user-tools/ or ~/.humangate/built-in-tools/.\n"
     blocks = []
     for tool, (scope, path) in tools.items():
-        label = f"{tool} (global)" if scope == "global" else tool
-        if tool in shadowed:
-            label += " (overrides the global one)"
+        label = f"{tool} ({tool_label(tool, scope, found)})"
         text = tool_help(path) or "(no description - add a comment header with a Usage: line)"
         blocks.append(f"{label}:\n" + "\n".join(f"  {line}".rstrip() for line in text.splitlines()))
     return 0, "\n\n".join(blocks) + "\n"
@@ -529,15 +540,15 @@ def cmd_tools(argv):
     if len(argv) > 1:
         usage("tools takes at most one tool name")
     name = argv[0] if argv else None
-    # Global tools live on the host, out of the sandbox's sight, so ask the
-    # loop - it answers at once, like ping. Without a loop, list what's
-    # visible here.
+    # User and built-in tools live on the host, out of the sandbox's
+    # sight, so ask the loop - it answers at once, like ping. Without a loop,
+    # list what's visible here.
     queue = queue_dir()
     outcome = ask_loop(queue, {"kind": "tools", "name": name})
     if outcome is None:
         print(
             f"humangate: {no_answer(queue)}, so this lists only the tools visible here - "
-            "global ones on the host are missing.\n",
+            "user and built-in ones, on the host, are missing.\n",
             file=sys.stderr,
         )
         exit_code, text = describe_tools(worktree_root(), name)
@@ -781,18 +792,19 @@ def run(worktree, argv):
     return (128 - exit_code if exit_code < 0 else exit_code), "".join(output)[-MAX_OUTPUT_CHARS:]
 
 
-def shown_command(tool, args, worktree):
+def shown_command(name, scope, args):
+    """The command as the person sees it, styled: where the tool comes from,
+    then the command itself - `(built-in) git-sign my-branch`."""
     # What the person approves must be exactly what runs, so arguments the
     # terminal couldn't show as they are, or too long to show whole, refuse the
     # request rather than being cleaned up or cut short for display.
     for arg in args:
         if any(ch != "\n" and not ch.isprintable() for ch in arg):
             raise Invalid(f"argument {arg[:40]!r} has control or invisible characters")
-    # The path isn't quoted, so ~ stays readable; tool paths never need it.
-    command = " ".join([clean_text(display_path(tool, worktree), required=False), *map(shlex.quote, args)])
-    if len(command) > MAX_COMMAND_CHARS:
-        raise Invalid(f"the command is {len(command)} characters; at most {MAX_COMMAND_CHARS} can be shown for approval")
-    return command
+    quoted = " ".join(map(shlex.quote, args))
+    if len(name) + len(quoted) > MAX_COMMAND_CHARS:
+        raise Invalid(f"the command is {len(name) + len(quoted)} characters; at most {MAX_COMMAND_CHARS} can be shown for approval")
+    return dim(f"({scope})") + " " + command_style(" ".join([name, quoted]) if args else name)
 
 
 class Approver:
@@ -827,7 +839,7 @@ class Approver:
         if waiting:
             request_id, shown = waiting
             print(f"Request {request_id} is waiting; it's refused unless you accept this:")
-            print(command_style(shown) + "\n")
+            print(shown + "\n")
         else:
             print("Requests are refused until you accept this or it's reverted.\n")
         state, roots, newly = self.guard.proposal(current)
@@ -884,21 +896,22 @@ class Approver:
                 return
             if request.get("kind") != "run":
                 raise Invalid(f"unknown request kind {request.get('kind')!r}")
-            tool = resolve_tool(self.worktree, request.get("tool"))
+            name = request.get("tool")
+            scope, tool = resolve_tool(self.worktree, name)
             args = request.get("args")
             if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
                 raise Invalid("args must be a list of strings")
             reason = clean_text(request.get("reason"), required=True)
             current = self.guard.fingerprint()
             changed = self.guard.changed(current)
-            waiting = (request_id, shown_command(tool, args, self.worktree))
+            waiting = (request_id, shown_command(name, scope, args))
             if changed and not self.review(current, changed, waiting):
                 raise Invalid(
                     "guarded files changed and the person hasn't accepted the change: "
                     + ", ".join(self.guard.name(key) for key in changed)
                 )
             # Resolved again: accepting a change may have changed the tools.
-            tool = resolve_tool(self.worktree, request.get("tool"))
+            scope, tool = resolve_tool(self.worktree, name)
         except (Invalid, ValueError) as error:
             print(f"\n{styled('Refused an invalid request', '1', '31')} {dim(request_id)}: {error}")
             finish({"status": "invalid", "message": str(error)}, decision="invalid", message=str(error))
@@ -907,7 +920,7 @@ class Approver:
         argv = [tool, *args]
         key = tuple(argv)
         entry = {"tool": request["tool"], "args": args, "reason": reason}
-        greeting = random.choice(GREETINGS).format(command=command_style(shown_command(tool, args, self.worktree)))
+        greeting = random.choice(GREETINGS).format(command=shown_command(name, scope, args))
         print(f"\n\n{dim(f'[{request_id}]')} {greeting}\n")
         print(reason)
 
@@ -1052,7 +1065,8 @@ def cmd_loop(argv):
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
     print(f"{title('humangate loop')} watching {approver.queue} {dim('(Ctrl-C to stop)')}")
-    tools = [f"{n} (global)" if scope == "global" else n for n, (scope, _) in available_tools(worktree).items()]
+    found = [(scope, tools_in(directory)) for scope, directory in tool_dirs(worktree)]
+    tools = [f"{n} ({tool_label(n, scope, found)})" for n, (scope, _) in available_tools(worktree).items()]
     print(dim(f"Tools: {', '.join(tools) or 'none'}"))
     guard = approver.guard
     guarded = ", ".join([GIT_CONFIG, *(name for name, _, _ in guard.roots)])
@@ -1077,169 +1091,6 @@ def cmd_loop(argv):
         approver.release_abandoned()
         print("\nhumangate loop stopped.")
     return 0
-
-
-# Tools `humangate init` can add to a project, kept here so the installed
-# script is all there is. Each: (summary, file contents).
-STARTER_TOOLS = {
-    "git-sign": (
-        "re-sign a branch's commits in place (after a rebase, say)",
-        r'''#!/usr/bin/env bash
-# Usage: git-sign <branch>
-#
-# Re-signs every commit <branch> has on top of the base branch (main, or
-# $HUMANGATE_BASE_BRANCH), in place - the base stays where it is - and moves
-# stacked branches pointing into that range along with it. <branch> must be
-# checked out in this worktree, with no uncommitted changes.
-#
-# On the base branch itself it re-signs only the commits not on origin yet
-# (all of them in a new repository), never published history.
-set -euo pipefail
-
-if [ "${1:-}" = --help ]; then
-  awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
-  exit 0
-fi
-
-fail() { echo "git-sign: $*" >&2; exit 2; }
-
-[ $# -eq 1 ] || fail "usage: git-sign <branch>"
-branch=$1
-current=$(git symbolic-ref --quiet --short HEAD || true)
-[ "$branch" = "$current" ] || fail "works on the branch checked out here (${current:-detached HEAD}), not '$branch'"
-[ -z "$(git status --porcelain --untracked-files=no)" ] || fail "the worktree has uncommitted changes"
-
-base_branch=${HUMANGATE_BASE_BRANCH:-main}
-if [ "$branch" = "$base_branch" ]; then
-  if published=$(git rev-parse --quiet --verify "refs/remotes/origin/$branch"); then
-    git merge-base --is-ancestor "$published" "$branch" ||
-      fail "'$branch' has diverged from origin/$branch"
-    range="$published..$branch"
-    onto=("$published")
-  else
-    range=$branch
-    onto=(--root)
-  fi
-else
-  base=$(git merge-base "$base_branch" "$branch")
-  range="$base..$branch"
-  onto=("$base")
-fi
-[ -n "$(git rev-list "$range")" ] || fail "'$branch' has no commits on top of $base_branch"
-[ -z "$(git rev-list --merges "$range")" ] || fail "'$branch' contains merge commits; only linear history is supported"
-
-echo "Re-signing:"
-git log --reverse --format='  %h %s' "$range"
-echo
-exec git rebase --force-rebase --gpg-sign --update-refs "${onto[@]}"
-''',
-    ),
-    "git-push": (
-        "push branches to origin, without force",
-        r'''#!/usr/bin/env bash
-# Usage: git-push <branch> [<branch>...]
-#
-# Pushes existing local branches to origin - no force, so git itself
-# refuses anything but a fast-forward or a new branch. Use git-push-with-force
-# for a branch whose history was rewritten (after a rebase, say).
-set -euo pipefail
-
-if [ "${1:-}" = --help ]; then
-  awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
-  exit 0
-fi
-
-fail() { echo "git-push: $*" >&2; exit 2; }
-
-[ $# -ge 1 ] || fail "usage: git-push <branch> [<branch>...]"
-for branch in "$@"; do
-  case "$branch" in -*) fail "not a branch name: '$branch'" ;; esac
-  git show-ref --verify --quiet "refs/heads/$branch" || fail "no local branch '$branch'"
-done
-
-exec git push origin "$@"
-''',
-    ),
-    "git-push-with-force": (
-        "force-push rewritten branches with lease, never main/master",
-        r'''#!/usr/bin/env bash
-# Usage: git-push-with-force <branch> [<branch>...]
-#
-# Force-pushes (with lease) existing local branches to origin, replacing
-# their history there - for a branch rewritten by a rebase. Never main or
-# master; the lease refuses if origin moved since the last fetch.
-set -euo pipefail
-
-if [ "${1:-}" = --help ]; then
-  awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
-  exit 0
-fi
-
-fail() { echo "git-push-with-force: $*" >&2; exit 2; }
-
-[ $# -ge 1 ] || fail "usage: git-push-with-force <branch> [<branch>...]"
-for branch in "$@"; do
-  case "$branch" in
-    main | master) fail "refusing to force-push $branch - use git-push" ;;
-    -*) fail "not a branch name: '$branch'" ;;
-  esac
-  git show-ref --verify --quiet "refs/heads/$branch" || fail "no local branch '$branch'"
-done
-
-exec git push --force-with-lease origin "$@"
-''',
-    ),
-    "gh-pr-create": (
-        "open a GitHub pull request for a pushed branch",
-        r'''#!/usr/bin/env bash
-# Usage: gh-pr-create [--base <branch>] <branch> <title> [<body>]
-#
-# Opens a GitHub pull request, with the gh CLI, from <branch> into the base
-# branch (main, $HUMANGATE_BASE_BRANCH, or --base for a stacked branch).
-# <branch> must already be pushed to origin as it is locally, so the pull
-# request holds exactly the commits you see here.
-set -euo pipefail
-
-if [ "${1:-}" = --help ]; then
-  awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
-  exit 0
-fi
-
-fail() { echo "gh-pr-create: $*" >&2; exit 2; }
-usage="usage: gh-pr-create [--base <branch>] <branch> <title> [<body>]"
-
-base=${HUMANGATE_BASE_BRANCH:-main}
-if [ "${1:-}" = --base ]; then
-  [ $# -ge 2 ] || fail "$usage"
-  base=$2
-  shift 2
-fi
-[ $# -eq 2 ] || [ $# -eq 3 ] || fail "$usage"
-branch=$1
-title=$2
-body=${3:-}
-
-for name in "$branch" "$base"; do
-  case "$name" in -*) fail "not a branch name: '$name'" ;; esac
-done
-[ "$branch" != "$base" ] || fail "'$branch' is the base branch"
-case "$title" in
-  "" | *[![:print:]]*) fail "the title must be one line of text" ;;
-esac
-command -v gh >/dev/null || fail "the gh CLI isn't installed"
-
-git show-ref --verify --quiet "refs/heads/$branch" || fail "no local branch '$branch'"
-git show-ref --verify --quiet "refs/remotes/origin/$base" || fail "no branch '$base' on origin"
-[ "$(git rev-parse --quiet --verify "refs/remotes/origin/$branch" || true)" = "$(git rev-parse "refs/heads/$branch")" ] ||
-  fail "'$branch' isn't pushed to origin as it is locally - push it first"
-
-echo "Pull request $branch -> $base:"
-git log --reverse --format='  %h %s' "refs/remotes/origin/$base..refs/heads/$branch"
-echo
-exec gh pr create --base="$base" --head="$branch" --title="$title" --body="$body"
-''',
-    ),
-}
 
 
 def checklist(heading, items):
@@ -1406,61 +1257,33 @@ def write_guard(worktree):
 
 
 def cmd_init(argv):
-    flags = {"--force", "--global", "--instructions", "--guard"}
+    flags = {"--force", "--instructions", "--guard"}
+    unknown = [a for a in argv if a not in flags]
+    if unknown:
+        usage(f"unknown argument {', '.join(unknown)}")
     force = "--force" in argv
-    is_global = "--global" in argv
-    names = [a for a in argv if a not in flags]
-    unknown = [n for n in names if n not in STARTER_TOOLS]
-    if unknown or any(n.startswith("-") for n in names):
-        usage(f"unknown tool {', '.join(unknown)} (available: {', '.join(STARTER_TOOLS)})")
-    if is_global and "--instructions" in argv:
-        usage("--instructions go into a project's AGENTS.md, not with --global")
-    if is_global and "--guard" in argv:
-        usage(f"--guard writes a project's {GUARD_FILE}, not with --global")
-
-    if is_global:
-        if os.environ.get("WM_SANDBOX_GUEST"):
-            sys.exit("humangate init --global installs tools on the host - run it there, not in the sandbox.")
-        worktree = None
-        tools_dir = global_tools_dir()
-        shown_dir = "~/.humangate/tools"
-    else:
-        worktree = worktree_root()
-        tools_dir = os.path.join(worktree, ".humangate", "tools")
-        shown_dir = ".humangate/tools"
     add_instructions = "--instructions" in argv
     add_guard = "--guard" in argv
+    worktree = worktree_root()
 
-    def status(name):
-        path = os.path.join(tools_dir, name)
-        if not os.path.exists(path):
-            return "new"
-        with open(path) as f:
-            return "same" if f.read() == STARTER_TOOLS[name][1] else "differs"
-
-    if not names and not add_instructions and not add_guard:
+    if not add_instructions and not add_guard:
         if not sys.stdin.isatty():
-            usage(
-                f"name what to add, e.g. `humangate init --instructions --guard git-sign git-push` "
-                f"(tools: {', '.join(STARTER_TOOLS)})"
-            )
+            usage("name what to add, e.g. `humangate init --instructions --guard`")
+        exists, missing = guard_suggestions(worktree)
+        label = f"files to guard ({GUARD_FILE})"
+        if missing:
+            label += f": {', '.join(missing)}"
+        items = [
+            (
+                "--instructions",
+                f"instructions for the agent ({AGENT_INSTRUCTIONS_FILE}, referenced from {instructions_file(worktree)})",
+                instructions_status(worktree),
+            ),
+            ("--guard", label, "new" if missing or not exists else "same"),
+        ]
         notes = {"new": "", "same": dim(" (already added)"), "differs": dim(" (yours differs - kept unless --force)")}
-        items = [(name, f"{name} - {summary}", status(name)) for name, (summary, _) in STARTER_TOOLS.items()]
-        if worktree:
-            items.append(
-                (
-                    "--instructions",
-                    f"instructions for the agent ({AGENT_INSTRUCTIONS_FILE}, referenced from {instructions_file(worktree)})",
-                    instructions_status(worktree),
-                )
-            )
-            exists, missing = guard_suggestions(worktree)
-            label = f"files to guard ({GUARD_FILE})"
-            if missing:
-                label += f": {', '.join(missing)}"
-            items.append(("--guard", label, "new" if missing or not exists else "same"))
         picked = checklist(
-            "Add to this project" if worktree else f"Add tools to {shown_dir}/",
+            "Set up this project",
             [(label + notes[state], state == "new") for _, label, state in items],
         )
         if picked is None:
@@ -1469,33 +1292,14 @@ def cmd_init(argv):
         chosen = [items[i][0] for i in picked]
         add_instructions = "--instructions" in chosen
         add_guard = "--guard" in chosen
-        names = [c for c in chosen if c not in flags]
         print()
 
-    changed = False
     files_changed = []
     if add_guard:
         change = write_guard(worktree)
         print(f"guard: {change or 'already there'}")
         if change:
             files_changed.append(GUARD_FILE)
-    if names:
-        os.makedirs(tools_dir, exist_ok=True)
-    for name in names:
-        path = os.path.join(tools_dir, name)
-        state = status(name)
-        if state == "same":
-            print(f"{name}: already there")
-            continue
-        if state == "differs" and not force:
-            print(f"{name}: kept yours - it differs (--force to replace it)")
-            continue
-        with open(path, "w") as f:
-            f.write(STARTER_TOOLS[name][1])
-        os.chmod(path, 0o755)
-        print(f"{name}: {'replaced' if state == 'differs' else 'added'} {shown_dir}/{name}")
-        changed = True
-
     if add_instructions:
         changes = write_instructions(worktree, force)
         print(f"instructions: {'; '.join(changes) or 'already there'}")
@@ -1504,14 +1308,10 @@ def cmd_init(argv):
         if any(c.startswith("pointed") for c in changes):
             files_changed.append(instructions_file(worktree))
 
-    review = " A running `humangate loop` asks you to review the change."
-    if changed and is_global:
-        print(dim("\nGlobal tools are available in every project." + review))
-    elif changed or files_changed:
-        paths = ([".humangate/tools/"] if changed else []) + files_changed
-        listed = ", ".join(paths[:-1]) + " and " + paths[-1] if len(paths) > 1 else paths[0]
-        guarded = changed or GUARD_FILE in files_changed
-        print(dim(f"\nCommit {listed} so the changes travel with the project.{review if guarded else ''}"))
+    if files_changed:
+        listed = ", ".join(files_changed[:-1]) + " and " + files_changed[-1] if len(files_changed) > 1 else files_changed[0]
+        review = " A running `humangate loop` asks you to review the change." if GUARD_FILE in files_changed else ""
+        print(dim(f"\nCommit {listed} so the changes travel with the project.{review}"))
     return 0
 
 

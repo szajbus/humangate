@@ -9,20 +9,26 @@ shows them any change. See `README.md` for what it does and how it's used.
 
 - `bin/humangate` - the whole program: one Python script, both the agent side (`request`,
   `tools`, `ping`, `wait`) and the person's side (`loop`).
-- `install.sh` - the `curl | sh` installer; downloads `bin/humangate` from GitHub.
+- `install.sh` - the `curl | sh` installer; downloads `bin/humangate` from GitHub, and every
+  built-in tool into `~/.humangate/built-in-tools/`, which it owns: it replaces them,
+  and removes ones no longer listed.
+- Tools come from three places, labelled everywhere by where they're from - `project`
+  (`.humangate/tools/`), `user` (`~/.humangate/user-tools/`, the person's own, which the
+  installer never touches) and `built-in`; the first with a tool of that name wins.
 - `docs/` - the documentation site (Astro Starlight), deployed to GitHub Pages by
   `.github/workflows/docs.yml`. Its pages follow the README's sections but carry the full
   detail, while the README stays short - a change to how humangate behaves goes in both - plus
-  a page on the starter tools, to update when `STARTER_TOOLS` changes.
-- Starter tools (`git-sign`, `git-push`, `git-push-with-force`, `gh-pr-create`) live inside `bin/humangate`, in `STARTER_TOOLS`, so the
-  installed script is self-contained; `humangate init` writes them into a project, or with
-  `--global` into `~/.humangate/tools/` on the host.
+  a page on the built-in tools, to update when `tools/` changes.
+- `tools/` - the built-in tools (`git-sign`, `git-push`, `git-push-with-force`,
+  `gh-pr-create`) and their `index`, one name per line, which the installer downloads into
+  `~/.humangate/built-in-tools/`. A new tool goes in both.
+- `humangate init` only sets a project up: instructions for the agent and the guard list.
 - The loop also guards files: the tools, git hooks and config, and whatever a project lists in
   `.humangate/guard` (`humangate init --guard` suggests entries from `GUARD_CANDIDATES`). It
   shows changes as diffs to accept or refuse.
-- `.humangate/tools/` - the tools this repository itself uses, installed from the starter tools
-  (`bin/humangate init --force git-sign git-push git-push-with-force gh-pr-create` after changing them); development of humangate goes
-  through humangate, so sign and push by requesting them (`humangate request ...`).
+- Development of humangate goes through humangate, with the built-in tools on the host -
+  sign and push by requesting them (`humangate request ...`). A change to `tools/` reaches
+  them once it's on `main` and the person re-runs the installer.
 
 ## Conventions
 

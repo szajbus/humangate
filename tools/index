@@ -1,0 +1,6 @@
+# The built-in tools, which install.sh puts in ~/.humangate/built-in-tools/,
+# one name per line.
+git-sign
+git-push
+git-push-with-force
+gh-pr-create

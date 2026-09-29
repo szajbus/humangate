@@ -6,17 +6,25 @@ description: What a humangate tool is and how to write one.
 A tool is a capability you grant the agent. You're not asked "is this shell command safe?" but
 "do I let the agent do this, with these arguments?" - a question you can answer at a glance.
 
-It's any executable in a project's `.humangate/tools/` or in `~/.humangate/tools/` on the
-host (global tools, available in every project). It runs in the project root on the host with
-the agent's arguments as-is.
+It's any executable in one of these, looked up in this order - the first with a tool of that
+name wins. `humangate tools` and the loop label each tool with where it comes from:
 
-The agent discovers tools with `humangate tools`. It sees the global ones only while the loop is
-running: they live in your home on the host, which the sandbox can't see, so the loop lists
-them for it.
+- **project** - the project's `.humangate/tools/`;
+- **user** - `~/.humangate/user-tools/` on the host: your own, available in every project;
+- **built-in** - `~/.humangate/built-in-tools/` on the host: the
+  [built-in tools](/built-in-tools/), which the installer keeps current.
+
+So you override a built-in tool with a copy of your own in either of the first two, and
+the label says so: `git-push (user, overrides built-in)`. A tool runs
+in the project root on the host with the agent's arguments as-is.
+
+The agent discovers tools with `humangate tools`. It sees the ones on the host only while the
+loop is running: they live in your home on the host, which the sandbox can't see, so the loop
+lists them for it.
 
 - Start it with a comment header after the shebang: a `Usage:` line and a short description.
   That's what `humangate tools` shows the agent - read from the file, never by running the tool.
-- Print the same header on `--help`, as the starter tools do.
+- Print the same header on `--help`, as the built-in tools do.
 - Validate every argument - they come from the agent. Refuse anything unexpected with a
   non-zero exit and a message on stderr.
 - Keep it small and specific, so the command you're asked to approve says exactly what will

@@ -1,11 +1,18 @@
 ---
-title: Starter tools
-description: The ready-made tools humangate init adds - git-sign, git-push, git-push-with-force and gh-pr-create.
+title: Built-in tools
+description: The ready-made tools the installer adds - git-sign, git-push, git-push-with-force and gh-pr-create.
 ---
 
-`humangate init` adds these to a project's `.humangate/tools/`, picked from a checklist or named
-as arguments; `humangate init --global` adds them to `~/.humangate/tools/` on the host, for every
-project. It never overwrites a tool you've changed, unless you pass `--force`.
+The installer puts these in `~/.humangate/built-in-tools/` on the host, so they're
+available in every project, downloading them from the
+[humangate repository](https://github.com/szajbus/humangate/tree/main/tools).
+That directory is the installer's: running it again replaces them with the current versions,
+and removes any no longer offered. Don't change them there.
+
+To change one, copy it into `~/.humangate/user-tools/` - your own tools, which the installer
+never touches - or into a project's `.humangate/tools/`, and edit the copy. It overrides the
+built-in tool of the same name; `humangate tools` labels it `user, overrides
+built-in` or `project, overrides built-in`.
 
 They're ordinary [tools](/tools/): small bash scripts you can read, change or use as a
 starting point for your own.

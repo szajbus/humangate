@@ -10,11 +10,11 @@ When the agent asks, you decide:
 ```
 $ humangate loop
 humangate loop watching /home/me/project/.humangate/queue (Ctrl-C to stop)
-Tools: git-push, git-push-with-force, git-sign
+Tools: gh-pr-create (built-in), git-push (built-in), git-push-with-force (built-in), git-sign (built-in)
 Guarding: git config, .humangate/tools, .humangate/guard, .git/hooks, package.json (18 files)
 Log: /home/me/.humangate/logs/home-me-project.jsonl
 
-[4f93b1686d8a3142] hey human, can you please run .humangate/tools/git-sign my-branch for me?
+[4f93b1686d8a3142] hey human, can you please run (built-in) git-sign my-branch for me?
 
 Rebased onto main; signatures were lost
 
@@ -58,10 +58,10 @@ host once you approve it. Credentials the agent never gets can't leak.
 
 ## Use
 
-1. Run `humangate init`. It adds starter tools - `git-sign`, `git-push`,
-   `git-push-with-force`, `gh-pr-create` - to `.humangate/tools/` (or with `--global`, to `~/.humangate/tools/`
-   on the host, for every project), and offers to tell the agent about humangate in
-   `AGENTS.md` and to suggest files to guard.
+1. Run `humangate init` in the project. It offers to tell the agent about humangate in
+   `AGENTS.md` and to suggest files to guard. Tools need no setting up: humangate comes
+   with `git-sign`, `git-push`, `git-push-with-force` and `gh-pr-create` built in, for every
+   project; add your own to the project's `.humangate/tools/`.
 2. On the host, in the project directory, run `humangate loop` and keep it open. Every project
    directory - every git worktree, too - has its own queue, so run one loop per agent session;
    a second loop in the same directory refuses to start.
@@ -71,9 +71,16 @@ host once you approve it. Credentials the agent never gets can't leak.
 A tool is a capability you grant the agent. You're not asked "is this shell command safe?" but
 "do I let the agent do this, with these arguments?"
 
-It's any executable in `.humangate/tools/`, or in `~/.humangate/tools/` on the host for every
-project. It runs in the project root with the agent's arguments as-is. The agent lists tools
-with `humangate tools` (the global ones only while the loop runs).
+It's any executable in one of these - the first with a tool of that name wins, and each tool
+is labelled with where it comes from:
+
+- **project** - `.humangate/tools/` in the project;
+- **user** - `~/.humangate/user-tools/` on the host, yours for every project;
+- **built-in** - `~/.humangate/built-in-tools/` on the host, replaced whenever the
+  installer runs; override one with your own copy in either of the others.
+
+It runs in the project root with the agent's arguments as-is. The agent lists tools with
+`humangate tools` (those on the host only while the loop runs).
 
 - Put a `Usage:` line and a short description in a comment after the shebang - that's what the
   agent sees - and print it on `--help`.
