@@ -23,7 +23,8 @@ or token to hand out; the price is polling - an answer takes up to a second.
 ## Set up a project
 
 1. Give the project some tools: executables in `.humangate/tools/`. `humangate init` adds
-   ready-made ones - `git-sign`, `git-push` and `git-push-with-force` - picked from a
+   ready-made ones - `git-sign`, `git-push`, `git-push-with-force` and
+   `gh-pr-create` - picked from a
    checklist; `humangate init --global` adds them to `~/.humangate/tools/` on the host instead,
    for every project (see [Starter tools](/starter-tools/)). Write your own for anything else
    (see [Tools](/tools/)).

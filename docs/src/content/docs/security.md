@@ -23,8 +23,10 @@ to read what you approve.
   sandbox bypasses it entirely - keep those on the host (see
   [Which credentials go where](/credentials/)).
 - A request is only a tool name, arguments and a reason. The command shown to you is exactly
-  the one that runs, with no shell involved. Control characters are stripped from what's shown,
-  so it can't rewrite your terminal.
+  the one that runs, with no shell involved. The loop refuses a request whose arguments have
+  control or invisible characters - which could rewrite your terminal, or hide text from you -
+  or whose command is too long to show whole (over 4,000 characters), rather than cleaning up
+  or cutting short what you see.
 - The agent can edit what the tools run, and turn a tool into a confused deputy. The first
   defense is how the tool is written (see [Tools](/tools/)); the second is
   [guarding files](/guarding-files/).
