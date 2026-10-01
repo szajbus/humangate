@@ -4,6 +4,8 @@
 # Pushes existing local branches to origin - no force, so git itself
 # refuses anything but a fast-forward or a new branch. Use git-push-with-force
 # for a branch whose history was rewritten (after a rebase, say).
+#
+# Action: diff - the commits origin doesn't have yet, with their changes
 set -euo pipefail
 
 if [ "${1:-}" = --help ]; then
@@ -13,10 +15,30 @@ fi
 
 fail() { echo "git-push: $*" >&2; exit 2; }
 
+# The loop's "just look" actions, run for the person only: <tool> --action <name> <arg>...
+ACTION=
+if [ "${1:-}" = --action ]; then
+  ACTION=${2:-}
+  [ "$ACTION" = diff ] || fail "unknown action '$ACTION'"
+  shift 2
+fi
+
 [ $# -ge 1 ] || fail "usage: git-push <branch> [<branch>...]"
 for branch in "$@"; do
   case "$branch" in -*) fail "not a branch name: '$branch'" ;; esac
   git show-ref --verify --quiet "refs/heads/$branch" || fail "no local branch '$branch'"
 done
+
+if [ "$ACTION" = diff ]; then
+  for branch in "$@"; do
+    echo "== $branch"
+    if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+      git log --reverse --stat -p "refs/remotes/origin/$branch..refs/heads/$branch"
+    else
+      git log --reverse --stat -p "refs/heads/$branch" --not --remotes=origin
+    fi
+  done
+  exit 0
+fi
 
 exec git push origin "$@"

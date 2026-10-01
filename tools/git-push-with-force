@@ -4,6 +4,8 @@
 # Force-pushes (with lease) existing local branches to origin, replacing
 # their history there - for a branch rewritten by a rebase. Never main or
 # master; the lease refuses if origin moved since the last fetch.
+#
+# Action: diff - what the new history changes compared to origin's
 set -euo pipefail
 
 if [ "${1:-}" = --help ]; then
@@ -13,6 +15,14 @@ fi
 
 fail() { echo "git-push-with-force: $*" >&2; exit 2; }
 
+# The loop's "just look" actions, run for the person only: <tool> --action <name> <arg>...
+ACTION=
+if [ "${1:-}" = --action ]; then
+  ACTION=${2:-}
+  [ "$ACTION" = diff ] || fail "unknown action '$ACTION'"
+  shift 2
+fi
+
 [ $# -ge 1 ] || fail "usage: git-push-with-force <branch> [<branch>...]"
 for branch in "$@"; do
   case "$branch" in
@@ -21,5 +31,14 @@ for branch in "$@"; do
   esac
   git show-ref --verify --quiet "refs/heads/$branch" || fail "no local branch '$branch'"
 done
+
+if [ "$ACTION" = diff ]; then
+  for branch in "$@"; do
+    echo "== $branch (origin's version -> yours)"
+    git diff --stat "refs/remotes/origin/$branch" "refs/heads/$branch" -- 2>&1 || true
+    git range-diff "refs/remotes/origin/$branch...refs/heads/$branch" 2>&1 || true
+  done
+  exit 0
+fi
 
 exec git push --force-with-lease origin "$@"

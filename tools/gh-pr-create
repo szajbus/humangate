@@ -5,6 +5,8 @@
 # branch (main, $HUMANGATE_BASE_BRANCH, or --base for a stacked branch).
 # <branch> must already be pushed to origin as it is locally, so the pull
 # request holds exactly the commits you see here.
+#
+# Action: diff - what the pull request would contain
 set -euo pipefail
 
 if [ "${1:-}" = --help ]; then
@@ -13,6 +15,14 @@ if [ "${1:-}" = --help ]; then
 fi
 
 fail() { echo "gh-pr-create: $*" >&2; exit 2; }
+
+# The loop's "just look" actions, run for the person only: <tool> --action <name> <arg>...
+ACTION=
+if [ "${1:-}" = --action ]; then
+  ACTION=${2:-}
+  [ "$ACTION" = diff ] || fail "unknown action '$ACTION'"
+  shift 2
+fi
 usage="usage: gh-pr-create [--base <branch>] <branch> <title> [<body>]"
 
 base=${HUMANGATE_BASE_BRANCH:-main}
@@ -39,6 +49,12 @@ git show-ref --verify --quiet "refs/heads/$branch" || fail "no local branch '$br
 git show-ref --verify --quiet "refs/remotes/origin/$base" || fail "no branch '$base' on origin"
 [ "$(git rev-parse --quiet --verify "refs/remotes/origin/$branch" || true)" = "$(git rev-parse "refs/heads/$branch")" ] ||
   fail "'$branch' isn't pushed to origin as it is locally - push it first"
+
+if [ "$ACTION" = diff ]; then
+  git diff --stat "refs/remotes/origin/$base...refs/heads/$branch"
+  git diff "refs/remotes/origin/$base...refs/heads/$branch"
+  exit 0
+fi
 
 echo "Pull request $branch -> $base:"
 git log --reverse --format='  %h %s' "refs/remotes/origin/$base..refs/heads/$branch"

@@ -13,6 +13,8 @@
 #
 # On the base branch itself it re-signs only the commits not on origin yet
 # (all of them in a new repository), never published history.
+#
+# Action: diff - the commits in that range, with their changes
 set -euo pipefail
 
 if [ "${1:-}" = --help ]; then
@@ -21,6 +23,14 @@ if [ "${1:-}" = --help ]; then
 fi
 
 fail() { echo "git-sign: $*" >&2; exit 2; }
+
+# The loop's "just look" actions, run for the person only: <tool> --action <name> <arg>...
+ACTION=
+if [ "${1:-}" = --action ]; then
+  ACTION=${2:-}
+  [ "$ACTION" = diff ] || fail "unknown action '$ACTION'"
+  shift 2
+fi
 
 [ $# -eq 1 ] || fail "usage: git-sign <branch>"
 branch=$1
@@ -46,6 +56,11 @@ else
 fi
 [ -n "$(git rev-list "$range")" ] || fail "'$branch' has no commits on top of $base_branch"
 [ -z "$(git rev-list --merges "$range")" ] || fail "'$branch' contains merge commits; only linear history is supported"
+
+if [ "$ACTION" = diff ]; then
+  git log --reverse --stat -p "$range"
+  exit 0
+fi
 
 # The first commit without a good signature (G, or U for an unknown trust level).
 first_unsigned=

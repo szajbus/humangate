@@ -25,6 +25,11 @@ lists them for it.
 - Start it with a comment header after the shebang: a `Usage:` line and a short description.
   That's what `humangate tools` shows the agent - read from the file, never by running the tool.
 - Print the same header on `--help`, as the built-in tools do.
+- Optionally offer the person "just look" actions with header lines like
+  `# Action: diff - the commits it would push, with their changes`. The loop adds each to the
+  request menu and runs `<tool> --action <name> <arg>...` on the host when they pick it; the
+  output shows in the loop only, the agent never sees it. Those lines don't appear in
+  `humangate tools`. The built-in tools all offer `diff`.
 - Validate every argument - they come from the agent. Refuse anything unexpected with a
   non-zero exit and a message on stderr.
 - Keep it small and specific, so the command you're asked to approve says exactly what will

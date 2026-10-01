@@ -22,10 +22,12 @@ Run it? (↑/↓ and Enter, or a shortcut letter)
     n  No
   ❯ y  Yes, run it
     a  Yes, and don't ask again for this exact command (until restart)
+    e  Edit the command, then run it...
+    d  diff - the commits in that range, with their changes (just look)
     r  Reply to the agent instead...
 ```
 
-The tool's output and exit code go back to the agent's `request`.
+The tool's output and exit code go back to the agent's `request`. If you edit the command first (in `$VISUAL`/`$EDITOR`), the agent is told what actually ran. A tool can offer actions (`d` above): they run on your host, show their output in the loop and tell the agent nothing - to look before you decide.
 
 ## Install
 

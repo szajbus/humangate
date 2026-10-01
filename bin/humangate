@@ -53,7 +53,15 @@ and Enter, or the shortcut letter):
   y  run it in your environment and send the output back
   a  same, and run this exact command again without asking for as long as
      this loop keeps running
+  e  edit the command in $VISUAL/$EDITOR (a tool and its arguments), then
+     run it; the agent is told what ran, with the output. Empty goes back.
   r  type a reply that goes back to the agent, without running anything
+
+A tool can offer more choices, "just look" actions that run on the host and
+show their output only to the person - a diff of what a commit-signing tool
+would rewrite, say. It declares them in its header (`# Action: diff - what
+it shows`) and handles `<tool> --action <name> <arg>...`; each gets a
+shortcut letter in the menu, and the menu comes back afterwards.
 
 Ctrl-C while a request is up cancels just that request (or interrupts its
 running tool); while idle it stops the loop. Decisions are logged on the
@@ -90,6 +98,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import termios
 import time
 import tty
@@ -112,6 +121,8 @@ MAX_REASON_CHARS = 2_000
 MAX_COMMAND_CHARS = 4_000  # the command as shown for approval
 REQUEST_ID = re.compile(r"^[0-9a-f]{16}$")
 TOOL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+ACTION_NAME = re.compile(r"^[a-z][a-z0-9-]{0,19}$")
+ACTION_LINE = re.compile(r"^Action:\s*(\S+)(?:\s+-\s+(.*))?$")
 # The project's list of paths to guard, on top of the built-in ones, and the
 # key the repo's git config is guarded under.
 GUARD_FILE = ".humangate/guard"
@@ -188,6 +199,8 @@ def wait_for_result(queue, request_id, timeout):
         outcome = json.load(f)
     os.remove(result)
 
+    if outcome.get("ran"):
+        print(f"[humangate: the person edited your command and ran: {outcome['ran']}]")
     if outcome.get("output"):
         print(outcome["output"], end="" if outcome["output"].endswith("\n") else "\n")
     if outcome["status"] == "done":
@@ -509,12 +522,35 @@ def tool_help(path):
         return None
     if lines and lines[0].startswith("#!"):
         lines = lines[1:]
+    header = [line for line in header_lines(lines) if not ACTION_LINE.match(line)]
+    return "\n".join(header).strip() or None
+
+
+def header_lines(lines):
     header = []
     for line in lines:
         if not line.startswith("#"):
             break
         header.append(line[2:] if line.startswith("# ") else line[1:])
-    return "\n".join(header).strip() or None
+    return header
+
+
+def tool_actions(path):
+    """What the person can have the tool do for them, besides running it, as
+    declared in its header: `# Action: diff - show what would change`. The
+    loop runs `<tool> --action <name> <arg>...` and shows the output to the
+    person only. name -> description."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except (UnicodeDecodeError, OSError):
+        return {}
+    actions = {}
+    for line in header_lines(lines[1:] if lines and lines[0].startswith("#!") else lines):
+        match = ACTION_LINE.match(line)
+        if match and ACTION_NAME.match(match.group(1)):
+            actions.setdefault(match.group(1), (match.group(2) or match.group(1)).strip())
+    return actions
 
 
 def describe_tools(worktree, name=None):
@@ -685,27 +721,48 @@ CHOICES = [
     ("no", "n", "No"),
     ("yes", "y", "Yes, run it"),
     ("always", "a", "Yes, and don't ask again for this exact command (until restart)"),
-    ("reply", "r", "Reply to the agent instead..."),
+    ("edit", "e", "Edit the command, then run it..."),
 ]
+REPLY_CHOICE = ("reply", "r", "Reply to the agent instead...")
+
+
+def request_choices(actions):
+    """The menu for a request: the fixed choices, one per action the tool
+    offers (shortcut: the first letter of its name still free, else a digit),
+    and the reply last."""
+    choices = list(CHOICES) + [REPLY_CHOICE]
+    taken = {key for _, key, _ in choices}
+    spare = iter("123456789")
+    for name, description in actions.items():
+        key = next((c for c in name if c.isalpha() and c not in taken), None) or next(spare, None)
+        if key is None:
+            break
+        taken.add(key)
+        choices.insert(len(choices) - 1, ("action:" + name, key, f"{name} - {description} (just look)"))
+    return choices
+
+
 GUARD_CHOICES = [
     ("refuse", "n", "No - refuse requests until it's reverted"),
     ("accept", "y", "Yes, accept it as the approved state"),
 ]
 
 
-def choose():
+def choose(choices):
     """The menu for a request; returns (choice, reply text)."""
     if not sys.stdin.isatty():
-        # Piped input (tests, scripts): one line - y, a, n/empty or a reply.
-        line = ask("Run it? [y/a/N/r or reply text] ").strip()
-        by_key = {key: name for name, key, _ in CHOICES}
+        # Piped input (tests, scripts): one line - a shortcut letter, empty
+        # for no, or a reply.
+        keys = "/".join(key for _, key, _ in choices if key != "n")
+        line = ask(f"Run it? [{keys}/N or reply text] ").strip()
+        by_key = {key: name for name, key, _ in choices}
         choice = by_key.get(line.lower(), "no" if not line else "reply")
         if choice != "reply":
             return choice, ""
         text = ask("Reply: ").strip() if line.lower() == "r" else line
         return ("reply", text) if text else ("no", "")
 
-    choice = menu("Run it?", CHOICES)
+    choice = menu("Run it?", choices)
     if choice == "reply":
         try:
             text = ask(f"{styled('Reply:', '1', '35')} ").strip()
@@ -919,19 +976,34 @@ class Approver:
             finish({"status": "invalid", "message": str(error)}, decision="invalid", message=str(error))
             return
 
-        argv = [tool, *args]
-        key = tuple(argv)
         entry = {"tool": request["tool"], "args": args, "reason": reason}
         greeting = random.choice(GREETINGS).format(command=shown_command(name, scope, args))
         print(f"\n\n{dim(f'[{request_id}]')} {greeting}\n")
         print(reason)
 
-        auto = key in self.always
-        if auto:
+        edited = False
+        if (name, *args) in self.always:
             print("\n" + styled('Approved earlier with "always" - running.', "1", "32"))
-            choice, reply = "yes", ""
+            auto, choice, reply = True, "yes", ""
         else:
-            choice, reply = choose()
+            auto = False
+            while True:
+                choice, reply = choose(request_choices(tool_actions(tool)))
+                if choice.startswith("action:"):
+                    self.do_action(tool, choice[len("action:"):], args)
+                elif choice == "edit":
+                    command = self.edit(name, args)
+                    if command:
+                        edited = (command[0], command[3]) != (name, args)
+                        name, scope, tool, args = command
+                        choice = "yes"
+                        break
+                else:
+                    break
+        argv = [tool, *args]
+        key = (name, *args)
+        if edited:
+            entry = {**entry, "ran": [name, *args]}
         print()
 
         if choice in ("yes", "always") and self.guard.changed(self.guard.fingerprint()):
@@ -944,11 +1016,12 @@ class Approver:
             if choice == "always":
                 self.always.add(key)
             exit_code, output = run(self.worktree, argv)
-            decision = "auto-approved" if auto else "approved"
-            finish(
-                {"status": "done", "exit_code": exit_code, "output": output},
-                **entry, decision=decision, exit_code=exit_code,
-            )
+            decision = "auto-approved" if auto else "edited" if edited else "approved"
+            outcome = {"status": "done", "exit_code": exit_code, "output": output}
+            if edited:
+                # The agent must know it didn't get what it asked for.
+                outcome["ran"] = " ".join(map(shlex.quote, [name, *args]))
+            finish(outcome, **entry, decision=decision, exit_code=exit_code)
             status = styled(f"Exit code {exit_code}", "1", "32" if exit_code == 0 else "31")
             print(f"\n{status} {dim('- result sent to the agent')}")
         elif choice == "cancel":
@@ -962,6 +1035,54 @@ class Approver:
             # for a different request or more context.
             finish({"status": "replied", "message": reply}, **entry, decision="replied", message=reply)
             print(styled("Not run - reply sent to the agent.", "1", "35"))
+
+    def do_action(self, tool, action, args):
+        """Runs a tool's action for the person: output shown here, never sent
+        to the agent."""
+        print(f"\n{styled(f'── {action} ──', '1', '36')}\n")
+        if self.guard.changed(self.guard.fingerprint()):
+            print(styled("Guarded files changed - not running it.", "1", "31"))
+            return
+        run(self.worktree, [tool, "--action", action, *args])
+        print(f"\n{dim(f'── end of {action} ──')}")
+
+    def edit(self, name, args):
+        """Lets the person change the command in their editor. Returns the
+        new (name, scope, tool path, args) - what to run - or None to go back
+        to the menu."""
+        text = (
+            "# Edit the command to run: a tool and its arguments, quoted as in a shell.\n"
+            "# Lines starting with # at the top are ignored. Empty it to go back.\n"
+            + " ".join(map(shlex.quote, [name, *args])) + "\n"
+        )
+        editor = shlex.split(os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi")
+        with tempfile.TemporaryDirectory(prefix="humangate-") as directory:
+            path = os.path.join(directory, "command")
+            with open(path, "w") as f:
+                f.write(text)
+            try:
+                if subprocess.run([*editor, path]).returncode != 0:
+                    print(styled("The editor failed - back to the menu.", "1", "31"))
+                    return None
+            except (OSError, KeyboardInterrupt) as error:
+                print(styled(f"Can't run the editor ({error or 'interrupted'}) - back to the menu.", "1", "31"))
+                return None
+            with open(path) as f:
+                lines = f.read().splitlines()
+        while lines and lines[0].lstrip().startswith("#"):
+            lines.pop(0)
+        try:
+            words = shlex.split("\n".join(lines))
+            if not words:
+                print(dim("Empty - back to the menu."))
+                return None
+            scope, tool = resolve_tool(self.worktree, words[0])
+            shown = shown_command(words[0], scope, words[1:])
+        except (ValueError, Invalid) as error:
+            print(styled(f"Can't use that: {error}", "1", "31"))
+            return None
+        print(f"\nRunning {shown}")
+        return words[0], scope, tool, words[1:]
 
     def pending(self):
         requests = []
