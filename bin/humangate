@@ -737,14 +737,14 @@ def request_choices(actions):
     choices = list(CHOICES)
     taken = {key for _, key, _ in choices}
     spare = iter("123456789")
-    for name, description in actions.items():
+    for name in actions:
         key = next((c for c in name if c.isalpha() and c not in taken), None) or next(spare, None)
         if key is None:
             break
         taken.add(key)
         if None not in choices:
             choices.append(None)
-        choices.append(("action:" + name, key, f"{name} - {description}"))
+        choices.append(("action:" + name, key, name))
     return choices
 
 

@@ -24,7 +24,7 @@ Run it? (↑/↓ and Enter, or a shortcut letter)
     e  edit (then run)
     r  reply
       ────────────────────────
-    d  diff - the commits in that range, with their changes
+    d  diff
 ```
 
 The tool's output and exit code go back to the agent's `request`. If you edit the command first (in `$VISUAL`/`$EDITOR`), the agent is told what actually ran. A tool can offer actions (`d` above): they run on your host, show their output in the loop and tell the agent nothing - to look before you decide.
