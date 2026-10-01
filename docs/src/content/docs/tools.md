@@ -18,6 +18,10 @@ So you override a built-in tool with a copy of your own in either of the first t
 the label says so: `git-push (user, overrides built-in)`. A tool runs
 in the project root on the host with the agent's arguments as-is.
 
+To try tools straight from a checkout, start the loop with `HUMANGATE_TOOLS_DIR=/path/to/tools
+humangate loop`: that directory is searched first and its tools are labelled `custom`. Only the
+loop reads it, on the host, so the agent can't change it.
+
 The agent discovers tools with `humangate tools`. It sees the ones on the host only while the
 loop is running: they live in your home on the host, which the sandbox can't see, so the loop
 lists them for it.

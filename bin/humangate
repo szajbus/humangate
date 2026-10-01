@@ -32,6 +32,8 @@ first with a tool of that name wins:
   user      ~/.humangate/user-tools/ on the host, the person's own
   built-in  ~/.humangate/built-in-tools/ on the host, kept current by the
             installer
+HUMANGATE_TOOLS_DIR, set where the loop starts, names one more directory
+that comes first (label `custom`), to try tools without installing them.
 The sandbox can't see the host's home, so `tools` asks the loop for the
 list (answered at once, like ping) and, without a loop, shows only what's
 visible locally.
@@ -451,7 +453,10 @@ def tool_dirs(worktree):
     # own, which overrides a built-in one - those the installer keeps
     # current, replacing them on every run.
     home = os.path.expanduser("~/.humangate")
-    return [
+    # HUMANGATE_TOOLS_DIR, set by the person when starting the loop, goes
+    # first - for trying tools out of a checkout without installing them.
+    custom = os.environ.get("HUMANGATE_TOOLS_DIR")
+    return ([("custom", os.path.abspath(os.path.expanduser(custom)))] if custom else []) + [
         ("project", os.path.join(worktree, ".humangate", "tools")),
         ("user", os.path.join(home, "user-tools")),
         ("built-in", os.path.join(home, "built-in-tools")),
