@@ -30,6 +30,8 @@ if [ "${1:-}" = --action ]; then
   ACTION=${2:-}
   [ "$ACTION" = diff ] || fail "unknown action '$ACTION'"
   shift 2
+  # Asked for by the loop when it shows the output on a terminal.
+  git() { command git ${HUMANGATE_COLOR:+-c color.ui=always} "$@"; }
 fi
 
 [ $# -eq 1 ] || fail "usage: git-sign <branch>"

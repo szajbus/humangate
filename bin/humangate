@@ -63,7 +63,9 @@ A tool can offer more choices, "just look" actions that run on the host and
 show their output only to the person - a diff of what a commit-signing tool
 would rewrite, say. It declares them in its header (`# Action: diff - what
 it shows`) and handles `<tool> --action <name> <arg>...`; each gets a
-shortcut letter in the menu, and the menu comes back afterwards.
+shortcut letter in the menu, and the menu comes back afterwards. On a terminal
+the output goes through $PAGER (less, if unset) and an action is asked for
+colour with HUMANGATE_COLOR=1 (unless NO_COLOR is set).
 
 Ctrl-C while a request is up cancels just that request (or interrupts its
 running tool); while idle it stops the loop. Decisions are logged on the
@@ -1048,8 +1050,38 @@ class Approver:
         if self.guard.changed(self.guard.fingerprint()):
             print(styled("Guarded files changed - not running it.", "1", "31"))
             return
-        run(self.worktree, [tool, "--action", action, *args])
+        argv = [tool, "--action", action, *args]
+        if sys.stdout.isatty():
+            self.page(argv)
+        else:
+            run(self.worktree, argv)
         print(f"\n{dim(f'── end of {action} ──')}")
+
+    def page(self, argv):
+        """Runs an action with its output going through the person's pager,
+        like git does, and asks it for colour (HUMANGATE_COLOR) - what it
+        prints through a pipe it would otherwise print plain."""
+        env = dict(os.environ)
+        if not env.get("NO_COLOR"):
+            env["HUMANGATE_COLOR"] = "1"
+        env.setdefault("LESS", "FRX")  # quit if it fits the screen, keep colours
+        try:
+            pager = subprocess.Popen(shlex.split(env.get("PAGER") or "less"), stdin=subprocess.PIPE)
+        except (OSError, ValueError):
+            pager = None
+        if pager is None:
+            run(self.worktree, argv)
+            return
+        # The pager reads straight from the action; Ctrl-C is for the pager
+        # (and the action, in the same process group), not for the loop.
+        previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            action = subprocess.Popen(argv, cwd=self.worktree, env=env, stdout=pager.stdin, stderr=subprocess.STDOUT)
+            pager.stdin.close()  # the action holds the only other end
+            action.wait()
+            pager.wait()
+        finally:
+            signal.signal(signal.SIGINT, previous)
 
     def edit(self, name, args):
         """Lets the person change the command in their editor. Returns the
