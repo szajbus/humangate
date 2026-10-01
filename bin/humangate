@@ -64,7 +64,7 @@ show their output only to the person - a diff of what a commit-signing tool
 would rewrite, say. It declares them in its header (`# Action: diff - what
 it shows`) and handles `<tool> --action <name> <arg>...`; each gets a
 shortcut letter in the menu, and the menu comes back afterwards. On a terminal
-the output goes through $PAGER (less, if unset) and an action is asked for
+the output goes through git's pager (core.pager, $PAGER; less) and an action is asked for
 colour with HUMANGATE_COLOR=1 (unless NO_COLOR is set).
 
 Ctrl-C while a request is up cancels just that request (or interrupts its
@@ -1065,8 +1065,11 @@ class Approver:
         if not env.get("NO_COLOR"):
             env["HUMANGATE_COLOR"] = "1"
         env.setdefault("LESS", "FRX")  # quit if it fits the screen, keep colours
+        # The pager git itself would use - core.pager, GIT_PAGER, PAGER - so the
+        # actions look like the person's `git diff`.
+        asked = subprocess.run(["git", "var", "GIT_PAGER"], cwd=self.worktree, env=env, capture_output=True, text=True)
         try:
-            pager = subprocess.Popen(shlex.split(env.get("PAGER") or "less"), stdin=subprocess.PIPE)
+            pager = subprocess.Popen(shlex.split(asked.stdout.strip() or "less"), stdin=subprocess.PIPE, env=env)
         except (OSError, ValueError):
             pager = None
         if pager is None:
