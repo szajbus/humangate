@@ -53,7 +53,7 @@ and Enter, or the shortcut letter):
 
   n  no: reject it (the default, so a stray Enter never runs anything)
   y  yes: run it in your environment and send the output back
-  e  edit (then run): change the command in $VISUAL/$EDITOR (a tool and its arguments), then
+  e  edit command (then run): change the command in $VISUAL/$EDITOR (a tool and its arguments), then
      run it; the agent is told what ran, with the output. Empty goes back.
   r  reply: type a reply that goes back to the agent, without running anything
 
@@ -725,7 +725,7 @@ GREETINGS = [
 CHOICES = [
     ("no", "n", "no"),
     ("yes", "y", "yes"),
-    ("edit", "e", "edit (then run)"),
+    ("edit", "e", "edit command (then run)"),
     ("reply", "r", "reply"),
 ]
 

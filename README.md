@@ -21,7 +21,7 @@ Rebased onto main; signatures were lost
 Run it? (↑/↓ and Enter, or a shortcut letter)
     n  no
   ❯ y  yes
-    e  edit (then run)
+    e  edit command (then run)
     r  reply
       ────────────────────────
     d  diff
