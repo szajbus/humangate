@@ -51,17 +51,15 @@ exit 5 means the person replied with a message instead of running it
 loop shows each request's reason and exact command, then a menu (arrow keys
 and Enter, or the shortcut letter):
 
-  n  reject it (the default, so a stray Enter never runs anything)
-  y  run it in your environment and send the output back
-  a  same, and run this exact command again without asking for as long as
-     this loop keeps running
-  e  edit the command in $VISUAL/$EDITOR (a tool and its arguments), then
+  n  no: reject it (the default, so a stray Enter never runs anything)
+  y  yes: run it in your environment and send the output back
+  e  edit (then run): change the command in $VISUAL/$EDITOR (a tool and its arguments), then
      run it; the agent is told what ran, with the output. Empty goes back.
-  r  type a reply that goes back to the agent, without running anything
+  r  reply: type a reply that goes back to the agent, without running anything
 
-A tool can offer more choices, "just look" actions that run on the host and
-show their output only to the person - a diff of what a commit-signing tool
-would rewrite, say. It declares them in its header (`# Action: diff - what
+A tool can offer more choices below a separator, "just look" actions that
+run on the host and show their output only to the person - a diff of what a
+commit-signing tool would rewrite, say. It declares them in its header (`# Action: diff - what
 it shows`) and handles `<tool> --action <name> <arg>...`; each gets a
 shortcut letter in the menu, and the menu comes back afterwards. On a terminal
 the output goes through git's pager (core.pager, $PAGER; less) and an action is asked for
@@ -725,19 +723,18 @@ GREETINGS = [
 
 
 CHOICES = [
-    ("no", "n", "No"),
-    ("yes", "y", "Yes, run it"),
-    ("always", "a", "Yes, and don't ask again for this exact command (until restart)"),
-    ("edit", "e", "Edit the command, then run it..."),
+    ("no", "n", "no"),
+    ("yes", "y", "yes"),
+    ("edit", "e", "edit (then run)"),
+    ("reply", "r", "reply"),
 ]
-REPLY_CHOICE = ("reply", "r", "Reply to the agent instead...")
 
 
 def request_choices(actions):
-    """The menu for a request: the fixed choices, one per action the tool
-    offers (shortcut: the first letter of its name still free, else a digit),
-    and the reply last."""
-    choices = list(CHOICES) + [REPLY_CHOICE]
+    """The menu for a request: the fixed choices, then one per action the
+    tool offers (shortcut: the first letter of its name still free, else a
+    digit), set apart by a separator (None)."""
+    choices = list(CHOICES)
     taken = {key for _, key, _ in choices}
     spare = iter("123456789")
     for name, description in actions.items():
@@ -745,7 +742,9 @@ def request_choices(actions):
         if key is None:
             break
         taken.add(key)
-        choices.insert(len(choices) - 1, ("action:" + name, key, f"{name} - {description} (just look)"))
+        if None not in choices:
+            choices.append(None)
+        choices.append(("action:" + name, key, f"{name} - {description}"))
     return choices
 
 
@@ -760,9 +759,10 @@ def choose(choices):
     if not sys.stdin.isatty():
         # Piped input (tests, scripts): one line - a shortcut letter, empty
         # for no, or a reply.
-        keys = "/".join(key for _, key, _ in choices if key != "n")
+        options = [choice for choice in choices if choice]
+        keys = "/".join(key for _, key, _ in options if key != "n")
         line = ask(f"Run it? [{keys}/N or reply text] ").strip()
-        by_key = {key: name for name, key, _ in choices}
+        by_key = {key: name for name, key, _ in options}
         choice = by_key.get(line.lower(), "no" if not line else "reply")
         if choice != "reply":
             return choice, ""
@@ -788,19 +788,28 @@ def confirm_change():
 
 def menu(question, choices):
     """Arrow-key menu of (name, shortcut, label) choices, or their shortcut
-    letters. The first is preselected, so it must be the safe one. Returns the
-    chosen name, or "cancel" on Ctrl-C."""
+    letters. The first is preselected, so it must be the safe one. A None
+    among the choices draws a separator. Returns the chosen name, or
+    "cancel" on Ctrl-C."""
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd)
     selected = 0
+    entries = choices
+    choices = [choice for choice in entries if choice]
 
     def render(first):
         if not first:
-            sys.stdout.write(f"\033[{len(choices)}A")
-        for index, (_, key, label) in enumerate(choices):
+            sys.stdout.write(f"\033[{len(entries)}A")
+        index = 0
+        for entry in entries:
+            if entry is None:
+                sys.stdout.write(f"\r\033[K  {dim('  ' + '─' * 24)}\n")
+                continue
+            _, key, label = entry
             line = f"{key}  {label}"
             text = styled(f"❯ {line}", "1", "36") if index == selected else f"  {dim(line)}"
             sys.stdout.write(f"\r\033[K  {text}\n")
+            index += 1
         sys.stdout.flush()
 
     print(f"\n{styled(question, '1', '32')} {dim('(↑/↓ and Enter, or a shortcut letter)')}")
@@ -881,9 +890,6 @@ class Approver:
         # Changed guarded files the person saw and didn't accept - watch()
         # stays quiet about them; a request still offers the review again.
         self.reviewed = set()
-        # Commands answered with "a": exact (tool, args) pairs that run
-        # without asking until this process exits.
-        self.always = set()
 
     def watch(self):
         """The tripwire, between requests: a change to a guarded file is shown
@@ -989,41 +995,33 @@ class Approver:
         print(reason)
 
         edited = False
-        if (name, *args) in self.always:
-            print("\n" + styled('Approved earlier with "always" - running.', "1", "32"))
-            auto, choice, reply = True, "yes", ""
-        else:
-            auto = False
-            while True:
-                choice, reply = choose(request_choices(tool_actions(tool)))
-                if choice.startswith("action:"):
-                    self.do_action(tool, choice[len("action:"):], args)
-                elif choice == "edit":
-                    command = self.edit(name, args)
-                    if command:
-                        edited = (command[0], command[3]) != (name, args)
-                        name, scope, tool, args = command
-                        choice = "yes"
-                        break
-                else:
+        while True:
+            choice, reply = choose(request_choices(tool_actions(tool)))
+            if choice.startswith("action:"):
+                self.do_action(tool, choice[len("action:"):], args)
+            elif choice == "edit":
+                command = self.edit(name, args)
+                if command:
+                    edited = (command[0], command[3]) != (name, args)
+                    name, scope, tool, args = command
+                    choice = "yes"
                     break
+            else:
+                break
         argv = [tool, *args]
-        key = (name, *args)
         if edited:
             entry = {**entry, "ran": [name, *args]}
         print()
 
-        if choice in ("yes", "always") and self.guard.changed(self.guard.fingerprint()):
+        if choice == "yes" and self.guard.changed(self.guard.fingerprint()):
             # Changed while the person was deciding: what they approved isn't
             # what would run.
             message = "guarded files changed while the request was up - not run; request it again"
             finish({"status": "rejected", "message": message}, **entry, decision="refused", message=message)
             print(styled("Guarded files changed meanwhile - not run.", "1", "31"))
-        elif choice in ("yes", "always"):
-            if choice == "always":
-                self.always.add(key)
+        elif choice == "yes":
             exit_code, output = run(self.worktree, argv)
-            decision = "auto-approved" if auto else "edited" if edited else "approved"
+            decision = "edited" if edited else "approved"
             outcome = {"status": "done", "exit_code": exit_code, "output": output}
             if edited:
                 # The agent must know it didn't get what it asked for.
